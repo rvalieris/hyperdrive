@@ -126,7 +126,7 @@ class HD:
 		self.conf['cache'] = self.args.cache
 		self.conf['prefix'] = self.args.prefix
 		r = cf.describe_stacks(StackName=self.args.stack_name)
-		output_keys = ['jobQueueUrl','logGroupName','workerProfileArn']
+		output_keys = ['jobQueueUrl','logGroupName','workerProfileArn','securityGroupId']
 		for o in r['Stacks'][0]['Outputs']:
 			if o['OutputKey'] not in output_keys:
 				print('Stack dont match expected outputs',file=sys.stderr)
@@ -359,16 +359,16 @@ class HD:
 		ec2 = boto3.client('ec2')
 		it = instance[0]
 		az = instance[1]
+		#'KeyName': self.conf['KeyName'],
 		r = ec2.request_spot_instances(
 			InstanceCount=1,
 			Type='one-time',
 			ValidUntil=datetime.datetime.utcnow()+datetime.timedelta(minutes=3),
 			LaunchSpecification={
-				'SecurityGroupIds': [self.conf['SecurityGroupId']],
+				'SecurityGroupIds': [self.conf['securityGroupId']],
 				'ImageId': self.conf['AmiId'],
 				'InstanceType': it,
 				'Placement': { 'AvailabilityZone': az },
-				'KeyName': self.conf['KeyName'],
 				'UserData': userdata,
 				'IamInstanceProfile': { 'Arn': self.conf['workerProfileArn']},
 				'BlockDeviceMappings': [{

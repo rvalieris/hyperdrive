@@ -6,7 +6,13 @@ Outputs:
     Value: !GetAtt WorkerProfile.Arn
   logGroupName:
     Value: !Ref JobLogs
+  securityGroupId:
+    Value: !GetAtt SecurityGroup.GroupId
 Resources:
+  SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'all inbound closed'
   JobLogs:
     Type: 'AWS::Logs::LogGroup'
     Properties:
