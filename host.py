@@ -39,26 +39,21 @@ def drop_priv(pwr):
 	os.setuid(pwr.pw_uid)
 	os.umask(0o22)
 
-def create_tags(kvs):
-	ec2 = boto3.client('ec2')
-	ec2.create_tags(Resources=[instance_id],Tags=kvs)
-
 def log_watcher():
-	cwl = boto.client('logs')
+	cwl = boto3.client('logs', region_name=region)
 	cwl.create_log_stream(logGroupName='hd-logs', logStreamName=jobid)
 	h = open(log_path)
 	inotify = inotify_simple.INotify()
 	wd = inotify.add_watch(log_path, inotify_simple.flags.MODIFY)
 	#h.seek(0,os.SEEK_END) # goto eof
+	kvargs = {'logGroupName':'hd-logs', 'logStreamName':jobid}
 	while True:
 		inotify.read(read_delay=1000)
 		t = round(datetime.datetime.now().timestamp()*1000)
 		logs = list(map(lambda l: {'timestamp': t, 'message': l}, h.readlines()))
-		cwl.put_log_events(
-			logGroupName='hd-logs',
-			logStreamName=jobid,
-			logEvents=logs
-		)
+		kvargs['logEvents'] = logs
+		r = cwl.put_log_events(**kvargs)
+		kvargs['sequenceToken'] = r['nextSequenceToken']
 
 def run():
 	# setup logging
@@ -102,7 +97,7 @@ if __name__ == '__main__':
 	except:
 		sqs = boto3.client('sqs', region_name=region)
 		sqs.send_message(QueueUrl=sqs_url, MessageBody=json.dumps({'jobid':jobid,'status':'FAILED'}))
-	subprocess.run([aws,'s3','cp',log_path,os.path.join('s3://',prefix,'_logs',jobid)])
+	#subprocess.run([aws,'s3','cp',log_path,os.path.join('s3://',prefix,'_logs',jobid)])
 	time.sleep(2) # give some time for the logging to finish
 	subprocess.run(['sudo','poweroff'])
 
