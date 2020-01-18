@@ -233,7 +233,7 @@ class HD:
 		script = open("host.py").read()
 		script = script.replace("<JOBID>", jobid)
 		script = script.replace("<SQSURL>", self.conf['jobQueueUrl'])
-		script = script.replace("<PREFIX>", sef.conf['prefix'])
+		script = script.replace("<PREFIX>", self.conf['prefix'])
 		script = script.replace("<LOGGROUP>", self.conf['logGroupName'])
 		return base64.b64encode(script.encode()).decode('ascii')
 
@@ -241,7 +241,7 @@ class HD:
 		logs = boto3.client('logs')
 		try:
 			r = logs.get_log_events(
-				logGroupName=sef.conf['logGroupName'],
+				logGroupName=self.conf['logGroupName'],
 				logStreamName=self.args.jobid,
 				limit=self.args.lines,
 				startFromHead=self.args.head
