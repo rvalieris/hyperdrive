@@ -78,6 +78,12 @@ class HD:
 		subparser.add_parser('smk-status').add_argument('jobid')
 		subparser.add_parser('submit-job').add_argument('jobscript')
 		subparser.add_parser('status',help='list jobs')
+		subparser.add_parser('clean-cache', help='clean finished jobs')
+		subparser.add_parser('kill', help='kill a job').add_argument('jobid')
+		p2 = subparser.add_parser('log', help='print logs from a job')
+		p2.add_argument('-n', '--lines', default=10, type=int, required=False)
+		p2.add_argument('--head', action='store_true')
+		p2.add_argument('jobid')
 		self.args, self.extra_args = self.parser.parse_known_args()
 		self.conf = {}
 		if os.path.exists(self.args.config):
@@ -87,9 +93,21 @@ class HD:
 			print('create config file first',file=sys.stderr)
 			sys.exit(1)
 
-	def stop_instance(req_id, instance_id):
+	def stop_instance(self, req_id, instance_id):
 		ec2.cancel_spot_instance_requests(SpotInstanceRequestIds=[req_id])
 		ec2.terminate_instances(InstanceIds=[instance_id])
+
+	def kill_job(self):
+		self.cache.vput(section='jobs', id=self.args.jobid, key='status', value='FAILED')
+		sir_id = self.cache.vget(section='jobs', id=self.args.jobid, key='sir')
+		instance_id = self.cache.vget(section='jobs', id=self.args.jobid, key='instance_id')
+		self.stop_instance(sir_id, instance_id)
+
+	def clean_cache(self):
+		jobids = self.cache.allids(section='jobs')
+		for i in jobids:
+			if self.cache.vget(section='jobs', id=i, key='status') in HD.job_end_states:
+				self.cache.vdel(section='jobs', id=i)
 
 	def instance_type_list(self):
 		# TODO: amd 
@@ -175,6 +193,30 @@ class HD:
 		script = script.replace("<SQSURL>", sqs_url)
 		script = script.replace("<PREFIX>", prefix)
 		return base64.b64encode(script.encode()).decode('ascii')
+
+	def print_log(self):
+		logs = boto3.client('logs')
+		try:
+			r = logs.get_log_events(
+				logGroupName="hd-logs",
+				logStreamName=self.args.jobid,
+				limit=self.args.lines,
+				startFromHead=self.args.head
+			)
+		except Exception as e:
+			if e.__class__.__name__ == 'ResourceInUseException' or e.__class__.__name__ == 'ResourceNotFoundException':
+				print(e)
+				print('no log data', file=sys.stderr)
+				sys.exit(1)
+			else:
+				raise e
+		for l in r['events']:
+			d = datetime.datetime.fromtimestamp(round(l['timestamp']/1000))
+			print(d,'|',l['message'],end='')
+		print('------')
+		for k in ['status']:
+			v = self.cache.vget(section='jobs', id=self.args.jobid, key=k)
+			if v is not None: print(k+': '+v)
 
 	def print_status(self):
 		keys = ['jobid', 'jobname', 'status', 'createdAt', 'sir']
@@ -338,6 +380,15 @@ class HD:
 
 		elif self.args.subcmd == 'status':
 			self.print_status()
+
+		elif self.args.subcmd == 'clean-cache':
+			self.clean_cache()
+
+		elif self.args.subcmd == 'kill':
+			self.kill_job()
+
+		elif self.args.subcmd == 'log':
+			self.print_log()
 
 		else:
 			self.parser.print_help()
