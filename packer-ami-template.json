@@ -1,0 +1,41 @@
+{
+  "variables": {
+    "aws_access_key": "",
+    "aws_secret_key": ""
+  },
+  "builders": [{
+    "type": "amazon-ebs",
+    "access_key": "{{user `aws_access_key`}}",
+    "secret_key": "{{user `aws_secret_key`}}",
+    "region": "us-west-2",
+    "source_ami_filter": {
+      "filters": {
+        "virtualization-type": "hvm",
+        "name": "amzn2-ami-minimal-hvm-2.0.2019*",
+        "root-device-type": "ebs",
+        "architecture": "x86_64"
+      },
+      "owners": ["amazon"],
+      "most_recent": true
+    },
+    "launch_block_device_mappings": [{
+      "device_name": "/dev/xvda",
+      "volume_size": 4,
+      "volume_type": "gp2",
+      "delete_on_termination": true
+    }],
+    "spot_instance_types": ["t3.small"],
+    "spot_price": "auto",
+    "ssh_username": "ec2-user",
+    "ami_name": "hd-ami-{{isotime|clean_resource_name}}",
+    "tags": {
+      "Base_AMI_Name": "{{ .SourceAMIName }}",
+      "Name": "hd-ami-{{isotime|clean_resource_name}}"
+    }
+  }],
+  "provisioners": [{
+    "type": "shell",
+    "script": "ami-script.sh",
+    "execute_command": "echo packer | sudo -S {{ .Vars }} {{ .Path }}"
+  }]
+}
