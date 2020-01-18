@@ -24,6 +24,7 @@ aws = os.path.join(conda_bin_path,'aws')
 jobid = '<JOBID>'
 prefix = '<PREFIX>'
 sqs_url = '<SQSURL>'
+log_group = '<LOGGROUP>'
 
 def get_metadata():
 	r = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document')
@@ -41,12 +42,12 @@ def drop_priv(pwr):
 
 def log_watcher():
 	cwl = boto3.client('logs', region_name=region)
-	cwl.create_log_stream(logGroupName='hd-logs', logStreamName=jobid)
+	cwl.create_log_stream(logGroupName=log_group, logStreamName=jobid)
 	h = open(log_path)
 	inotify = inotify_simple.INotify()
 	wd = inotify.add_watch(log_path, inotify_simple.flags.MODIFY)
 	#h.seek(0,os.SEEK_END) # goto eof
-	kvargs = {'logGroupName':'hd-logs', 'logStreamName':jobid}
+	kvargs = {'logGroupName':log_group, 'logStreamName':jobid}
 	while True:
 		inotify.read(read_delay=1000)
 		t = round(datetime.datetime.now().timestamp()*1000)

@@ -4,6 +4,7 @@ import os
 import sys
 import argparse
 import datetime
+import botocore
 import boto3
 import base64
 import yaml
@@ -25,6 +26,20 @@ def pp_table(data):
 	rf = "  ".join(map(lambda i: "{:"+str(i)+"}", ms))
 	for r in data:
 		print(rf.format(*r))
+
+def stack_exists(cf_client,stackname):
+	try:
+		cf_client.describe_stacks(StackName=stackname)
+		return True
+	except botocore.exceptions.ClientError:
+		return False
+
+def bucket_exists(s3_client,bucket):
+	try:
+		s3_client.head_bucket(Bucket=bucket)
+		return True
+	except botocore.exceptions.ClientError:
+		return False
 
 def s3_split_path(path):
 	if '/' not in path:
@@ -84,6 +99,10 @@ class HD:
 		p2.add_argument('-n', '--lines', default=10, type=int, required=False)
 		p2.add_argument('--head', action='store_true')
 		p2.add_argument('jobid')
+		p3 = subparser.add_parser('config',help='create or update hyperdrive config')
+		p3.add_argument('--stack-name', required=True)
+		p3.add_argument('--prefix', required=True)
+		p3.add_argument('--cache', default='cache.sqlite')
 		self.args, self.extra_args = self.parser.parse_known_args()
 		self.conf = {}
 		if os.path.exists(self.args.config):
@@ -92,6 +111,29 @@ class HD:
 		elif self.args.subcmd is not None and self.args.subcmd != 'config':
 			print('create config file first',file=sys.stderr)
 			sys.exit(1)
+
+	def create_config(self):
+		cf = boto3.client('cloudformation')
+		if not stack_exists(cf, self.args.stack_name):
+			print('stack not found',file=sys.stderr)
+			sys.exit(1)
+		bucket, key = s3_split_path(self.args.prefix)
+		s3 = boto3.client('s3')
+		if not bucket_exists(s3, bucket):
+			print('cant access bucket: '+bucket,file=sys.stderr)
+			sys.exit(1)
+
+		self.conf['cache'] = self.args.cache
+		self.conf['prefix'] = self.args.prefix
+		r = cf.describe_stacks(StackName=self.args.stack_name)
+		output_keys = ['jobQueueUrl','logGroupName','workerProfileArn']
+		for o in r['Stacks'][0]['Outputs']:
+			if o['OutputKey'] not in output_keys:
+				print('Stack dont match expected outputs',file=sys.stderr)
+				sys.exit(1)
+			self.conf[o['OutputKey']] = o['OutputValue']
+		self.conf['stackName'] = self.args.stack_name
+		yaml.dump(self.conf, open(self.args.config,'w'))
 
 	def stop_instance(self, req_id, instance_id):
 		ec2.cancel_spot_instance_requests(SpotInstanceRequestIds=[req_id])
@@ -187,18 +229,19 @@ class HD:
 			for az in prices[it].keys():
 				self.cache.vput(section='spot_prices', id=it, key=az, value=prices[it][az]['price'])
 
-	def _host_userscript(self, jobid, prefix, sqs_url):
+	def _host_userscript(self, jobid):
 		script = open("host.py").read()
 		script = script.replace("<JOBID>", jobid)
-		script = script.replace("<SQSURL>", sqs_url)
-		script = script.replace("<PREFIX>", prefix)
+		script = script.replace("<SQSURL>", self.conf['jobQueueUrl'])
+		script = script.replace("<PREFIX>", sef.conf['prefix'])
+		script = script.replace("<LOGGROUP>", self.conf['logGroupName'])
 		return base64.b64encode(script.encode()).decode('ascii')
 
 	def print_log(self):
 		logs = boto3.client('logs')
 		try:
 			r = logs.get_log_events(
-				logGroupName="hd-logs",
+				logGroupName=sef.conf['logGroupName'],
 				logStreamName=self.args.jobid,
 				limit=self.args.lines,
 				startFromHead=self.args.head
@@ -232,7 +275,7 @@ class HD:
 	def sqs_check_messages(self):
 		sqs = boto3.client('sqs')
 		r = sqs.receive_message(
-			QueueUrl=self.conf['JobStatusUrl'],
+			QueueUrl=self.conf['jobQueueUrl'],
 			MaxNumberOfMessages=10,
 			WaitTimeSeconds=2
 		)
@@ -240,7 +283,7 @@ class HD:
 			for m in r['Messages']:
 				j = json.loads(m['Body'])
 				self.cache.vput(section='jobs', id=j['jobid'], key='status', value=j['status'])
-				sqs.delete_message(QueueUrl=self.conf['JobStatusUrl'], ReceiptHandle=m['ReceiptHandle'])
+				sqs.delete_message(QueueUrl=self.conf['jobQueueUrl'], ReceiptHandle=m['ReceiptHandle'])
 
 	def spot_check_status(self, jobid):
 		sir_id = self.cache.vget(section='jobs', id=jobid, key='sir')
@@ -307,7 +350,7 @@ class HD:
 		it = random.choice(its)
 		sys.stderr.write(str(it)+'\n')
 
-		userdata = self._host_userscript(jobid, self.conf['prefix'], self.conf['JobStatusUrl'])
+		userdata = self._host_userscript(jobid)
 		sir_id = self.req_instance(jobid=jobid, userdata=userdata, vol_size=disk_gb, instance=it, jobname=job_name)
 		self.cache.dput(section='jobs', id=jobid, kwargs={'jobname':job_name, 'status': 'QUEUED', 'createdAt':datetime.datetime.now(), 'sir': sir_id })
 		print(jobid)
@@ -327,7 +370,7 @@ class HD:
 				'Placement': { 'AvailabilityZone': az },
 				'KeyName': self.conf['KeyName'],
 				'UserData': userdata,
-				'IamInstanceProfile': { 'Arn': self.conf['JobProfileArn']},
+				'IamInstanceProfile': { 'Arn': self.conf['workerProfileArn']},
 				'BlockDeviceMappings': [{
 					'DeviceName': '/dev/xvda',
 					'Ebs': { 'VolumeSize': vol_size, 'VolumeType': 'gp2' }
@@ -389,6 +432,9 @@ class HD:
 
 		elif self.args.subcmd == 'log':
 			self.print_log()
+
+		elif self.args.subcmd == 'config':
+			self.create_config()
 
 		else:
 			self.parser.print_help()

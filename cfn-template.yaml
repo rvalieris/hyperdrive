@@ -1,19 +1,25 @@
 AWSTemplateFormatVersion: 2010-09-09
 Outputs:
-  JobStatusUrl:
-    Value: !Ref JobStatus
-  WorkerProfileArn:
+  jobQueueUrl:
+    Value: !Ref JobQueue
+  workerProfileArn:
     Value: !GetAtt WorkerProfile.Arn
+  logGroupName:
+    Value: !Ref JobLogs
 Resources:
+  JobLogs:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: 30
   WorkerProfile:
     Type: 'AWS::IAM::InstanceProfile'
     Properties:
       Roles:
-        - !Ref JobRole
-  JobStatus:
+        - !Ref WorkerRole
+  JobQueue:
     Type: 'AWS::SQS::Queue'
     Properties: {}
-  JobRole:
+  WorkerRole:
     Type: 'AWS::IAM::Role'
     Properties:
       AssumeRolePolicyDocument:
@@ -28,3 +34,4 @@ Resources:
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
         - 'arn:aws:iam::aws:policy/AmazonSQSFullAccess'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
