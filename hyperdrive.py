@@ -6,7 +6,6 @@ import argparse
 import datetime
 import botocore
 import boto3
-import base64
 import yaml
 import sqlite3
 import uuid
@@ -182,7 +181,9 @@ class HD:
 		t0 = self.cache.vget(section='meta', id='spot_prices', key='time')
 		if t0 is not None: t0 = datetime.datetime.strptime(t0, '%Y-%m-%d %H:%M:%S.%f')
 		if t0 is None or (t1-t0) > datetime.timedelta(minutes=30):
+			print('refreshing spot prices ... ', file=sys.stderr, end='')
 			self.get_spot_prices()
+			print('done', file=sys.stderr)
 			self.cache.vput(section='meta', id='spot_prices', key='time', value=t1)
 
 		r = list(self.cache.select(
@@ -238,7 +239,7 @@ class HD:
 		script = script.replace("<SQSURL>", self.conf['jobQueueUrl'])
 		script = script.replace("<PREFIX>", self.conf['prefix'])
 		script = script.replace("<LOGGROUP>", self.conf['logGroupName'])
-		return base64.b64encode(script.encode()).decode('ascii')
+		return script
 
 	def print_log(self):
 		logs = boto3.client('logs')
@@ -265,13 +266,13 @@ class HD:
 			if v is not None: print(k+': '+v)
 
 	def print_status(self):
-		keys = ['jobid', 'jobname', 'status', 'createdAt', 'sir']
+		keys = ['jobid', 'jobname', 'status', 'startedAt', 'sir']
 		jobids = self.cache.allids(section='jobs')
 		data = []
 		for k in jobids:
 			l = list(self.cache.lget(section='jobs', ids=[k], keys=keys[1:]))
 			data.append([k]+l)
-		data = sorted(data, key=lambda k:k[3]) # createdAt
+		data = sorted(data, key=lambda k:k[3]) # startedAt
 		data.insert(0, keys) # header
 		pp_table(data)
 
@@ -293,35 +294,15 @@ class HD:
 	def spot_check_status(self, jobid):
 		sir_id = self.cache.vget(section='jobs', id=jobid, key='sir')
 		instance_id = self.cache.vget(section='jobs', id=jobid, key='instance_id')
-		ec2 = boto3.client('ec2')
-		if instance_id is None:
-			r = ec2.describe_spot_instance_requests(
-				SpotInstanceRequestIds=[sir_id]
-			)
-			r = r['SpotInstanceRequests'][0]
-			if r['State'] == 'active':
-				instance_id = r['InstanceId']
-				self.cache.vput(section='jobs', id=jobid, key='instance_id', value=r['InstanceId'])
-				jobname = self.cache.vget(section='jobs', id=jobid, key='jobname')
-				tags = [{'Key': 'Name', 'Value': jobname },{'Key':'JobId','Value':jobid}]
-				self.create_tags(instance_id, tags)
-				self.cache.vput(section='jobs', id=jobid, key='status', value='RUNNING')
-				return 'running'
-			elif r['State'] == 'open':
-				return 'running' # wait more
-			elif r['State'] == 'cancelled':
-				return 'failed'
-			elif r['State'] == 'closed' and r['status-code'] != 'instance-terminated-by-user':
-				return 'failed'
-		else:
-			# TODO: check instance
-			return 'running'
+		#ec2 = boto3.client('ec2')
+		# TODO: check instance status
+		return 'running'
 
 	def smk_status(self):
 		t1 = datetime.datetime.now()
 		t0 = self.cache.vget(section='meta', id='status', key='time')
 		if t0 is not None: t0 = datetime.datetime.strptime(t0, '%Y-%m-%d %H:%M:%S.%f')
-		if t0 is None or (t1-t0).total_seconds() > 5:
+		if t0 is None or (t1-t0).total_seconds() > 6:
 			self.sqs_check_messages()
 			self.cache.vput(section='meta', id='status', key='time', value=t1)
 
@@ -334,7 +315,7 @@ class HD:
 	def submit_job(self):
 		jobid = str(uuid.uuid4())
 		job_properties = read_job_properties(self.args.jobscript)
-		job_name = "hd-{}-{}".format(job_properties['rule'], job_properties['jobid'])
+		jobname = "hd-{}-{}".format(job_properties['rule'], job_properties['jobid'])
 		s3 = boto3.client('s3')
 		bucket, pkey = s3_split_path(self.conf['prefix'])
 		s3.upload_file(self.args.jobscript, bucket, os.path.join(pkey,'_jobs',jobid))
@@ -350,41 +331,48 @@ class HD:
 			elif 'disk_mb' in job_properties['resources']: disk_gb = math.ceil(job_properties['resources']['disk_mb']/1024)
 		disk_gb = disk_gb + 3 # extra space for OS
 
-		its = self.find_instances_req(job_properties.get('threads',1), mem_mb)
-		its = self.find_lowest_price(its)
-		it = random.choice(its)
-		sys.stderr.write(str(it)+'\n')
-
-		userdata = self._host_userscript(jobid)
-		sir_id = self.req_instance(jobid=jobid, userdata=userdata, vol_size=disk_gb, instance=it, jobname=job_name)
-		self.cache.dput(section='jobs', id=jobid, kwargs={'jobname':job_name, 'status': 'QUEUED', 'createdAt':datetime.datetime.now(), 'sir': sir_id })
+		self.req_instance(jobid=jobid, jobname=jobname, vcpus=job_properties.get('threads', 1), mem_mb=mem_mb, vol_size=disk_gb)
 		print(jobid)
 
-	def req_instance(self, jobid, userdata, vol_size, instance, jobname):
+	def req_instance(self, jobid, jobname, vcpus, mem_mb, vol_size):
 		ec2 = boto3.client('ec2')
+		its = self.find_instances_req(vcpus, mem_mb)
+		its = self.find_lowest_price(its)
+		instance = random.choice(its)
+		sys.stderr.write(str(instance)+'\n')
 		it = instance[0]
 		az = instance[1]
+		userdata = self._host_userscript(jobid)
 		#'KeyName': self.conf['KeyName'],
-		r = ec2.request_spot_instances(
-			InstanceCount=1,
-			Type='one-time',
-			ValidUntil=datetime.datetime.utcnow()+datetime.timedelta(minutes=3),
-			LaunchSpecification={
-				'SecurityGroupIds': [self.conf['securityGroupId']],
-				'ImageId': self.conf['AmiId'],
-				'InstanceType': it,
-				'Placement': { 'AvailabilityZone': az },
-				'UserData': userdata,
-				'IamInstanceProfile': { 'Arn': self.conf['workerProfileArn']},
-				'BlockDeviceMappings': [{
-					'DeviceName': '/dev/xvda',
-					'Ebs': { 'VolumeSize': vol_size, 'VolumeType': 'gp2' }
-				}],
-			}
+		tags = [{'Key': 'Name', 'Value': jobname },{'Key':'JobId','Value':jobid}]
+		r = ec2.run_instances(
+			MinCount=1, MaxCount=1,
+			SecurityGroupIds=[self.conf['securityGroupId']],
+			ImageId=self.conf['AmiId'],
+			InstanceType=it,
+			Placement={ 'AvailabilityZone': az },
+			UserData=userdata,
+			IamInstanceProfile={ 'Arn': self.conf['workerProfileArn']},
+			BlockDeviceMappings=[{
+				'DeviceName': '/dev/xvda',
+				'Ebs': { 'VolumeSize': vol_size, 'VolumeType': 'gp2' }
+			}],
+			InstanceMarketOptions={
+				'MarketType': 'spot',
+				'SpotOptions': { 'SpotInstanceType': 'one-time' }
+			},
+			TagSpecifications=[
+				{'ResourceType': 'instance', 'Tags': tags},
+				{'ResourceType': 'volume', 'Tags': tags},
+			]
 		)
-		r = r['SpotInstanceRequests'][0]
+		r = r['Instances'][0]
 		sir_id = r['SpotInstanceRequestId']
-		return sir_id
+		instance_id = r['InstanceId']
+		if instance_id is None or instance_id == '':
+			raise Exception(r)
+		self.cache.dput(section='jobs', id=jobid, kwargs={'jobname':jobname, 'status': 'RUNNING', 'startedAt':datetime.datetime.now(), 'sir': sir_id, 'instance_id': instance_id })
+		return True
 
 	def create_tags(self, instance_id, tags):
 		ec2 = boto3.client('ec2')
