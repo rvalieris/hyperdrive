@@ -24,7 +24,7 @@
       "volume_type": "gp2",
       "delete_on_termination": true
     }],
-    "spot_instance_types": ["t3.small"],
+    "spot_instance_types": ["m3.medium"],
     "spot_price": "auto",
     "ssh_username": "ec2-user",
     "ami_name": "hd-ami-{{isotime|clean_resource_name}}",

@@ -35,6 +35,7 @@ cd /root
 # disable stuff
 systemctl mask serial-getty@ttyS0.service
 systemctl disable getty@tty1
+systemctl disable rsyslog
 
 # clean up
 yum -y remove gcc git postfix glibc-locale-source mariadb-libs glibc-all-langpacks selinux-policy cronie audit
