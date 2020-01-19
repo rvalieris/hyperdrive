@@ -344,7 +344,12 @@ class HD:
 		az = instance[1]
 		userdata = self._host_userscript(jobid)
 		#'KeyName': self.conf['KeyName'],
-		tags = [{'Key': 'Name', 'Value': jobname },{'Key':'JobId','Value':jobid}]
+		tags = [
+			{'Key': 'Name', 'Value': jobname },
+			{'Key': 'HD-JobId', 'Value': jobid },
+			{'Key': 'HD-Prefix', 'Value': self.conf['prefix'] },
+			{'Key': 'HD-Stack', 'Value': self.conf['stackName'] }
+		]
 		r = ec2.run_instances(
 			MinCount=1, MaxCount=1,
 			SecurityGroupIds=[self.conf['securityGroupId']],
@@ -373,13 +378,6 @@ class HD:
 			raise Exception(r)
 		self.cache.dput(section='jobs', id=jobid, kwargs={'jobname':jobname, 'status': 'RUNNING', 'startedAt':datetime.datetime.now(), 'sir': sir_id, 'instance_id': instance_id })
 		return True
-
-	def create_tags(self, instance_id, tags):
-		ec2 = boto3.client('ec2')
-		ec2.create_tags(Resources=[instance_id],Tags=tags)
-		r = ec2.describe_instances(InstanceIds=[instance_id])
-		for v in r['Reservations'][0]['Instances'][0]['BlockDeviceMappings']:
-			ec2.create_tags(Resources=[v['Ebs']['VolumeId']], Tags=tags)
 
 	def main(self):
 		if self.args.subcmd == 'snakemake':
