@@ -14,6 +14,11 @@ import itertools
 import boto3
 import random
 from snakemake.utils import read_job_properties
+import functools
+print = functools.partial(print, flush=True)
+
+def str2dt(s):
+	return datetime.datetime.strptime(s, '%Y-%m-%d %H:%M:%S.%f')
 
 def pp_table(data):
 	ms = list(map(len, data[0]))
@@ -150,24 +155,7 @@ class HD:
 			if self.cache.vget(section='jobs', id=i, key='status') in HD.job_end_states:
 				self.cache.vdel(section='jobs', id=i)
 
-	def instance_type_list(self):
-		# TODO: amd 
-		c4 = map(lambda n: 'c4.'+n+'large', ['','x','2x','4x','8x'])
-		m4 = map(lambda n: 'm4.'+n+'large', ['','x','2x','4x','10x','16x'])
-		r4 = map(lambda n: 'r4.'+n+'large', ['','x','2x','4x','8x','16x'])
-		c5 = map(lambda n: 'c5.'+n+'large', ['','x','2x','4x','9x','12x','18x','24x'])
-		m5r5 = map(lambda s: s[0]+s[1]+'.'+s[2]+'large', itertools.product(['r5','m5'],['','a'],['','x','2x','4x','8x','12x','16x','24x']))
-		others = ['m3.medium']
-		return list(itertools.chain(c4, m4, r4, c5, m5r5, others))
-
 	def find_instances_req(self,n_cpus, mem_mb):
-		t1 = datetime.datetime.now()
-		t0 = self.cache.vget(section='meta', id='instance_types', key='time')
-		if t0 is not None: t0 = datetime.datetime.strptime(t0, '%Y-%m-%d %H:%M:%S.%f')
-		if t0 is None or (t1-t0) > datetime.timedelta(hours=1):
-			self.get_instances_info()
-			self.cache.vput(section='meta', id='instance_types', key='time', value=t1)
-
 		cpus = set(map(lambda k:k[0],
 			self.cache.select('select id from kvstore where section=? and key=? and value>=?',
 			('instance_types','cpus',n_cpus))))
@@ -177,15 +165,7 @@ class HD:
 		return list(cpus.intersection(mems))
 
 	def find_lowest_price(self,instance_list):
-		t1 = datetime.datetime.now()
-		t0 = self.cache.vget(section='meta', id='spot_prices', key='time')
-		if t0 is not None: t0 = datetime.datetime.strptime(t0, '%Y-%m-%d %H:%M:%S.%f')
-		if t0 is None or (t1-t0) > datetime.timedelta(minutes=30):
-			print('refreshing spot prices ... ', file=sys.stderr, end='')
-			self.get_spot_prices()
-			print('done', file=sys.stderr)
-			self.cache.vput(section='meta', id='spot_prices', key='time', value=t1)
-
+		self.get_spot_prices()
 		r = list(self.cache.select(
 		'select min(value) from kvstore where section=? and id in ({})'.format(','.join(['?']*len(instance_list))),
 		('spot_prices', *instance_list)))
@@ -197,29 +177,62 @@ class HD:
 		return list(r)
 
 	def get_instances_info(self):
+		its = self.cache.allids(section='instance_types')
+		if len(its)>0: return
+		print('getting instance-type data ... ', end='', file=sys.stderr)
+
+		def it_filter(it):
+			if 'x86_64' not in it['ProcessorInfo']['SupportedArchitectures']: return False
+			if 'spot' not in it['SupportedUsageClasses']: return False
+			if 'ebs' not in it['SupportedRootDeviceTypes']: return False
+			if 'GpuInfo' in it: return False
+			if 'FpgaInfo' in it: return False
+			if 'InferenceAcceleratorInfo' in it: return False
+			if it['BareMetal']: return False
+			if it['BurstablePerformanceSupported']: return False
+			return True
+
 		ec2 = boto3.client('ec2')
-		instance_list = self.instance_type_list()
-		r = ec2.describe_instance_types(
-			InstanceTypes=instance_list
-		)
-		r = r['InstanceTypes']
-		for i in r:
+		its = []
+		args = {}
+		while True:
+			r = ec2.describe_instance_types(**args)
+			its.extend(r['InstanceTypes'])
+			if 'NextToken' in r and r['NextToken'] != '': args['NextToken'] = r['NextToken']
+			else: break
+		its = list(filter(it_filter, its))
+		for i in its:
 			k = i['InstanceType']
 			self.cache.dput(section='instance_types', id=k, kwargs={ 'cpus': i['VCpuInfo']['DefaultVCpus'], 'mem_mb': i['MemoryInfo']['SizeInMiB']})
-		return r
+		print('done', file=sys.stderr)
 
-	def get_spot_prices(self,max_results=200):
+	def get_spot_prices(self):
+		t1 = datetime.datetime.now()
+		t0 = self.cache.vget(section='meta', id='spot_prices', key='time')
+		if t0 is not None:
+			t0 = str2dt(t0)
+			if (t1-t0) < datetime.timedelta(minutes=30):
+				return
+
+		self.cache.vput(section='meta', id='spot_prices', key='time', value=t1)
+		print('refreshing spot prices ... ', file=sys.stderr, end='')
 		ec2 = boto3.client('ec2')
-		instance_list = self.instance_type_list()
-		r = ec2.describe_spot_price_history(
-			InstanceTypes=instance_list,
-			MaxResults=max_results,
-			StartTime=datetime.datetime.now(),
-			ProductDescriptions=['Linux/UNIX']
-		)
-		r = r['SpotPriceHistory']
+		instance_list = self.cache.allids(section='instance_types')
+		args = {
+			'InstanceTypes': instance_list,
+			'MaxResults': 1000,
+			'StartTime':datetime.datetime.utcnow(),
+			'EndTime':datetime.datetime.utcnow(),
+			'ProductDescriptions': ['Linux/UNIX (Amazon VPC)']
+		}
+		rs = []
+		while True:
+			r = ec2.describe_spot_price_history(**args)
+			rs.extend(r['SpotPriceHistory'])
+			if 'NextToken' in r and r['NextToken'] != '': args['NextToken'] = r['NextToken']
+			else: break
 		prices = {}
-		for i in r:
+		for i in rs:
 			it = i['InstanceType']
 			az = i['AvailabilityZone']
 			if it not in prices: prices[it] = {}
@@ -229,6 +242,7 @@ class HD:
 		for it in prices.keys():
 			for az in prices[it].keys():
 				self.cache.vput(section='spot_prices', id=it, key=az, value=prices[it][az]['price'])
+		print('done', file=sys.stderr)
 
 	def _host_userscript(self, jobid):
 		host_file = os.path.join(sys.path[0], 'host.py')
@@ -301,7 +315,7 @@ class HD:
 	def smk_status(self):
 		t1 = datetime.datetime.now()
 		t0 = self.cache.vget(section='meta', id='status', key='time')
-		if t0 is not None: t0 = datetime.datetime.strptime(t0, '%Y-%m-%d %H:%M:%S.%f')
+		if t0 is not None: t0 = str2dt(t0)
 		if t0 is None or (t1-t0).total_seconds() > 6:
 			self.sqs_check_messages()
 			self.cache.vput(section='meta', id='status', key='time', value=t1)
@@ -391,6 +405,8 @@ class HD:
 					'.', 's3://'+s3_workflow_path
 				])
 				if p.returncode != 0: sys.exit(p.returncode)
+				self.get_instances_info()
+				self.get_spot_prices()
 			os.execvp('snakemake',['snakemake',
 				'--default-remote-provider', 'S3',
 				'--default-remote-prefix', self.conf['prefix'],
