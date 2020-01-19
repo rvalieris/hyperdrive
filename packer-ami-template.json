@@ -11,7 +11,7 @@
     "source_ami_filter": {
       "filters": {
         "virtualization-type": "hvm",
-        "name": "amzn2-ami-minimal-hvm-2.0.2019*",
+        "name": "amzn2-ami-minimal-hvm-2.0.*",
         "root-device-type": "ebs",
         "architecture": "x86_64"
       },

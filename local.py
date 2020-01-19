@@ -282,8 +282,10 @@ class HD:
 		if 'Messages' in r:
 			for m in r['Messages']:
 				j = json.loads(m['Body'])
-				self.cache.vput(section='jobs', id=j['jobid'], key='status', value=j['status'])
-				sqs.delete_message(QueueUrl=self.conf['jobQueueUrl'], ReceiptHandle=m['ReceiptHandle'])
+				st = self.cache.vget(section='jobs', id=j['jobid'], key='status')
+				if st is not None:
+					self.cache.vput(section='jobs', id=j['jobid'], key='status', value=j['status'])
+					sqs.delete_message(QueueUrl=self.conf['jobQueueUrl'], ReceiptHandle=m['ReceiptHandle'])
 
 	def spot_check_status(self, jobid):
 		sir_id = self.cache.vget(section='jobs', id=jobid, key='sir')
