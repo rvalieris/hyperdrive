@@ -87,7 +87,7 @@ class HD:
 	def __init__(self):
 		self.pname = sys.argv[0]
 		self.parser = argparse.ArgumentParser()
-		self.parser.add_argument('--config', default='conf.yaml')
+		self.parser.add_argument('--config', default='hyperdrive.yaml')
 		subparser = self.parser.add_subparsers(dest='subcmd')
 		subparser.add_parser('snakemake', help='run snakemake')
 		subparser.add_parser('smk-status').add_argument('jobid')
@@ -102,7 +102,7 @@ class HD:
 		p3 = subparser.add_parser('config',help='create or update hyperdrive config')
 		p3.add_argument('--stack-name', required=True)
 		p3.add_argument('--prefix', required=True)
-		p3.add_argument('--cache', default='cache.sqlite')
+		p3.add_argument('--cache', default='hyperdrive.cache')
 		self.args, self.extra_args = self.parser.parse_known_args()
 		self.conf = {}
 		if os.path.exists(self.args.config):
@@ -230,7 +230,10 @@ class HD:
 				self.cache.vput(section='spot_prices', id=it, key=az, value=prices[it][az]['price'])
 
 	def _host_userscript(self, jobid):
-		script = open("host.py").read()
+		host_file = os.path.join(sys.path[0], 'host.py')
+		if not os.path.exists(host_file):
+			print('cant find host script: {}'.format(host_file), file=sys.stderr)
+		script = open(host_file).read()
 		script = script.replace("<JOBID>", jobid)
 		script = script.replace("<SQSURL>", self.conf['jobQueueUrl'])
 		script = script.replace("<PREFIX>", self.conf['prefix'])
