@@ -157,7 +157,7 @@ class HD:
 		r4 = map(lambda n: 'r4.'+n+'large', ['','x','2x','4x','8x','16x'])
 		c5 = map(lambda n: 'c5.'+n+'large', ['','x','2x','4x','9x','12x','18x','24x'])
 		m5r5 = map(lambda s: s[0]+s[1]+'.'+s[2]+'large', itertools.product(['r5','m5'],['','a'],['','x','2x','4x','8x','12x','16x','24x']))
-		others = ['m3.medium', 't3.small', 't3a.small']
+		others = ['m3.medium']
 		return list(itertools.chain(c4, m4, r4, c5, m5r5, others))
 
 	def find_instances_req(self,n_cpus, mem_mb):
@@ -343,7 +343,6 @@ class HD:
 		it = instance[0]
 		az = instance[1]
 		userdata = self._host_userscript(jobid)
-		#'KeyName': self.conf['KeyName'],
 		tags = [
 			{'Key': 'Name', 'Value': jobname },
 			{'Key': 'HD-JobId', 'Value': jobid },
@@ -353,7 +352,7 @@ class HD:
 		r = ec2.run_instances(
 			MinCount=1, MaxCount=1,
 			SecurityGroupIds=[self.conf['securityGroupId']],
-			ImageId=self.conf['AmiId'],
+			ImageId=self.conf['amiId'],
 			InstanceType=it,
 			Placement={ 'AvailabilityZone': az },
 			UserData=userdata,
