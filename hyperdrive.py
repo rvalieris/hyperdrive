@@ -53,10 +53,12 @@ def s3_split_path(path):
 
 class Cache:
 	def __init__(self, fname):
-		self.c = sqlite3.connect(fname)
+		self.c = sqlite3.connect(fname, timeout=datetime.timedelta(minutes=10).total_seconds())
 		self.c.execute('create table if not exists kvstore (section,id,key,value, PRIMARY KEY(section,id,key))')
+		self.c.commit()
 	def vput(self, section, id, key, value):
 		self.c.execute('insert or replace into kvstore values(?,?,?,?)', (section, id, key, value))
+		self.c.commit()
 	def dput(self, section, id, kwargs):
 		for k in kwargs.keys():
 			self.vput(section, id, k, kwargs[k])
@@ -79,6 +81,7 @@ class Cache:
 				yield self.vget(section, i, k)
 	def vdel(self, section, id):
 		self.c.execute('delete from kvstore where section = ? and id=?', (section,id))
+		self.c.commit()
 
 class HD:
 	job_end_states = ['SUCCESS','FAILED']
