@@ -53,29 +53,24 @@ def s3_split_path(path):
 
 class Cache:
 	def __init__(self, fname):
-		self.conn = sqlite3.connect(fname)
-		self.c = self.conn.cursor()
+		self.c = sqlite3.connect(fname)
 		self.c.execute('create table if not exists kvstore (section,id,key,value, PRIMARY KEY(section,id,key))')
-		self.conn.commit()
 	def vput(self, section, id, key, value):
 		self.c.execute('insert or replace into kvstore values(?,?,?,?)', (section, id, key, value))
-		self.conn.commit()
 	def dput(self, section, id, kwargs):
 		for k in kwargs.keys():
 			self.vput(section, id, k, kwargs[k])
 	def allids(self, section):
-		self.c.execute('select distinct id from kvstore where section=?',(section,))
-		return list(map(lambda r:r[0], self.c.fetchall()))
-	def alldata(self, section):
-		self.c.execute('select id,key,value from kvstore where section=?',(section,))
-		return list(self.c.fetchall())
+		ids = []
+		for row in self.c.execute('select distinct id from kvstore where section=?',(section,)):
+			ids.append(row[0])
+		return ids
 	def select(self, query, values):
-		cur = self.c.execute(query, values)
-		for row in cur:
+		for row in self.c.execute(query, values):
 			yield row
 	def vget(self, section, id, key):
-		self.c.execute('select value from kvstore where section = ? and id=? and key=?', (section, id, key))
-		r = self.c.fetchone()
+		cur = self.c.execute('select value from kvstore where section = ? and id=? and key=?', (section, id, key))
+		r = cur.fetchone()
 		if r is not None: return r[0]
 		else: return None
 	def lget(self, section, ids, keys):
@@ -84,7 +79,6 @@ class Cache:
 				yield self.vget(section, i, k)
 	def vdel(self, section, id):
 		self.c.execute('delete from kvstore where section = ? and id=?', (section,id))
-		self.conn.commit()
 
 class HD:
 	job_end_states = ['SUCCESS','FAILED']
