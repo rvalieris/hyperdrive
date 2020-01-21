@@ -20,9 +20,33 @@
     },
     "launch_block_device_mappings": [{
       "device_name": "/dev/xvda",
-      "volume_size": 4,
+      "volume_size": 3,
       "volume_type": "gp2",
       "delete_on_termination": true
+    },{
+      "device_name": "/dev/xvdb",
+      "virtual_name": "ephemeral0"
+    },{
+      "device_name": "/dev/xvdc",
+      "virtual_name": "ephemeral1"
+    },{
+      "device_name": "/dev/xvdd",
+      "virtual_name": "ephemeral2"
+    },{
+      "device_name": "/dev/xvde",
+      "virtual_name": "ephemeral3"
+    },{
+      "device_name": "/dev/xvdf",
+      "virtual_name": "ephemeral4"
+    },{
+      "device_name": "/dev/xvdg",
+      "virtual_name": "ephemeral5"
+    },{
+      "device_name": "/dev/xvdh",
+      "virtual_name": "ephemeral6"
+    },{
+      "device_name": "/dev/xvdi",
+      "virtual_name": "ephemeral7"
     }],
     "spot_instance_types": ["m3.medium"],
     "spot_price": "auto",

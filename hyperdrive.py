@@ -157,26 +157,24 @@ class HD:
 			if self.cache.vget(section='jobs', id=i, key='status') in HD.job_end_states:
 				self.cache.vdel(section='jobs', id=i)
 
-	def find_instances_req(self,n_cpus, mem_mb, storage_gb):
-		cpus = set(map(lambda k:k[0],
-			self.cache.select('select id from kvstore where section=? and key=? and value>=?',
-			('instance_types','cpus',n_cpus))))
-		mems = set(map(lambda k:k[0],
-			self.cache.select('select id from kvstore where section=? and key=? and value>=?',
-			('instance_types','mem_mb',mem_mb))))
-		return list(cpus.intersection(mems))
+	def find_instances_req(self, n_cpus, mem_mb, storage_gb):
+		cpus = set(map(lambda k:k[0],self.cache.c.execute('select id from kvstore where section=? and key=? and value>=?',('instance_types','cpus',n_cpus))))
+		mems = set(map(lambda k:k[0],self.cache.c.execute('select id from kvstore where section=? and key=? and value>=?',('instance_types','mem_mb',mem_mb))))
+		l = cpus.intersection(mems)
+		l = dict(self.cache.c.execute('select id,value from kvstore where section=? and key=? and id in ({})'.format(','.join(['?']*len(l))),('instance_types', 'storage_gb', *l)))
+		return l
 
-	def find_lowest_price(self,instance_list):
-		self.get_spot_prices()
-		r = list(self.cache.select(
-		'select min(value) from kvstore where section=? and id in ({})'.format(','.join(['?']*len(instance_list))),
-		('spot_prices', *instance_list)))
-		min_val = r[0][0]
-		r = list(self.cache.select(
-			'select id,key,value from kvstore where section=? and id in ({}) and value<=?'.format(
-			','.join(['?']*len(instance_list))),
-			('spot_prices', *instance_list, min_val)))
-		return list(r)
+	def find_lowest_price(self, instance_list, storage_gb):
+		ebs_gb_hour = 0.1/(24*30)
+		ls = []
+		for i in instance_list.keys():
+			extra_ebs = max(0,storage_gb - instance_list[i])
+			for az, ec2_hour in self.cache.c.execute('select key,value from kvstore where section=? and id=?',('spot_prices',i)):
+				total_cost = float(ec2_hour) + extra_ebs*ebs_gb_hour
+				ls.append({'az':az,'it':i,'cost':total_cost, 'extra_ebs': extra_ebs})
+		ls = sorted(ls, key=lambda i:i['cost'])
+		ls2 = list(filter(lambda i: i['cost']<=ls[0]['cost'], ls))
+		return ls2
 
 	def get_instances_info(self):
 		its = self.cache.allids(section='instance_types')
@@ -350,19 +348,19 @@ class HD:
 		if 'resources' in job_properties:
 			if 'disk_gb' in job_properties['resources']: disk_gb = job_properties['resources']['disk_gb']
 			elif 'disk_mb' in job_properties['resources']: disk_gb = math.ceil(job_properties['resources']['disk_mb']/1024)
-		disk_gb = disk_gb + 3 # extra space for OS
 
-		self.req_instance(jobid=jobid, jobname=jobname, vcpus=job_properties.get('threads', 1), mem_mb=mem_mb, vol_size=disk_gb)
+		self.req_instance(jobid=jobid, jobname=jobname, vcpus=job_properties.get('threads', 1), mem_mb=mem_mb, storage_gb=disk_gb)
 		print(jobid)
 
-	def req_instance(self, jobid, jobname, vcpus, mem_mb, vol_size):
+	def req_instance(self, jobid, jobname, vcpus, mem_mb, storage_gb):
 		ec2 = boto3.client('ec2')
-		its = self.find_instances_req(vcpus, mem_mb, vol_size)
-		its = self.find_lowest_price(its)
+		its = self.find_instances_req(vcpus, mem_mb, storage_gb)
+		its = self.find_lowest_price(its, storage_gb)
 		instance = random.choice(its)
 		sys.stderr.write(str(instance)+'\n')
-		it = instance[0]
-		az = instance[1]
+		it = instance['it']
+		az = instance['az']
+		extra_ebs = instance['extra_ebs']
 		userdata = self._host_userscript(jobid)
 		tags = [
 			{'Key': 'Name', 'Value': jobname },
@@ -370,6 +368,15 @@ class HD:
 			{'Key': 'HD-Prefix', 'Value': self.conf['prefix'] },
 			{'Key': 'HD-Stack', 'Value': self.conf['stackName'] }
 		]
+		block_devices = [{
+			'DeviceName': '/dev/xvda',
+			'Ebs': { 'VolumeSize': 3, 'VolumeType': 'gp2' }
+		}]
+		if extra_ebs > 0:
+			block_devices.append({
+				'DeviceName': '/dev/xvdz',
+				'Ebs': { 'VolumeSize': extra_ebs, 'VolumeType': 'gp2' }
+			})
 		r = ec2.run_instances(
 			MinCount=1, MaxCount=1,
 			SecurityGroupIds=[self.conf['securityGroupId']],
@@ -378,10 +385,7 @@ class HD:
 			Placement={ 'AvailabilityZone': az },
 			UserData=userdata,
 			IamInstanceProfile={ 'Arn': self.conf['workerProfileArn']},
-			BlockDeviceMappings=[{
-				'DeviceName': '/dev/xvda',
-				'Ebs': { 'VolumeSize': vol_size, 'VolumeType': 'gp2' }
-			}],
+			BlockDeviceMappings=block_devices,
 			InstanceMarketOptions={
 				'MarketType': 'spot',
 				'SpotOptions': { 'SpotInstanceType': 'one-time' }

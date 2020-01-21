@@ -15,7 +15,7 @@ from snakemake.utils import read_job_properties
 print = functools.partial(print, flush=True)
 
 conda_bin_path = '/opt/conda/bin'
-basedir = '/home/ec2-user'
+basedir = '/tmp/ec2-user'
 workflow_path = os.path.join(basedir, 'workflow')
 jobscript_path = os.path.join(basedir, 'job.sh')
 log_path = '/var/log/cloud-init-output.log'
@@ -33,6 +33,20 @@ def get_metadata():
 metadata = get_metadata()
 region = metadata['region']
 instance_id = metadata['instanceId']
+
+def lsblk():
+	p=subprocess.run(['lsblk','-b','-r','-p'],stdout=subprocess.PIPE)
+	lines = p.stdout.decode().rstrip().split('\n')
+	header = lines[0].split(' ')
+	h = []
+	for l in lines[1:]:
+		l = l.split(' ')
+		h2 = {}
+		for i,s in enumerate(header):
+			if len(l)>i: h2[s] = l[i]
+			else: h2[s] = ''
+		h.append(h2)
+	return h
 
 def drop_priv(pwr):
 	os.setgroups([])
@@ -56,9 +70,36 @@ def log_watcher():
 		r = cwl.put_log_events(**kvargs)
 		kvargs['sequenceToken'] = r['nextSequenceToken']
 
+def setup_storage():
+	h = lsblk()
+	root = list(filter(lambda i:i['MOUNTPOINT']=='/', h))[0]
+	disks = list(filter(lambda i:i['TYPE']=='disk' and i['NAME'] not in root['NAME'], h))
+	to_umount = list(filter(lambda i:i['MOUNTPOINT']!='/' and i['MOUNTPOINT'] != '', h))
+	# 1. umount ephemeral
+	for i in to_umount:
+		subprocess.run(['umount',i['MOUNTPOINT']])
+	
+	# 2. create raid0
+	disk_names = list(map(lambda i:i['NAME'], disks))
+	device = '/dev/md0'
+	if len(disk_names)>1:
+		p=subprocess.Popen(['yes'],stdout=subprocess.PIPE)
+		subprocess.run(['mdadm','-C','--force',device,'--level=0','-n',str(len(disks))]+disk_names,stdin=p.stdout)
+	else:
+		device = disk_names[0]
+	
+	# 3. mount /tmp
+	subprocess.run(['mkfs.xfs','-f',device])
+	subprocess.run(['mv','/tmp/ec2-user','/home/'])
+	subprocess.run(['mount',device,'/tmp'])
+	subprocess.run(['mv','/home/ec2-user','/tmp/'])
+	subprocess.run(['chmod','777','/tmp'])
+
 def run():
 	# setup logging
 	multiprocessing.Process(target=log_watcher).start()
+	# setup storage
+	setup_storage()
 	# copy jobscript to /root
 	subprocess.run([aws,'s3','cp',os.path.join('s3://',prefix,'_jobs',jobid),jobscript_path])
 
