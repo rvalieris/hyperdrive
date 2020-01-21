@@ -85,6 +85,11 @@ class Cache:
 
 class HD:
 	job_end_states = ['SUCCESS','FAILED']
+
+	def msg(self, s, end='\n', head=True):
+		h = self.pname+': ' if head else ''
+		print(h+s, file=sys.stderr, end=end)
+
 	def __init__(self):
 		self.pname = sys.argv[0]
 		self.parser = argparse.ArgumentParser()
@@ -110,18 +115,18 @@ class HD:
 			self.conf = yaml.safe_load(open(self.args.config))
 			self.cache = Cache(self.conf['cache'])
 		elif self.args.subcmd is not None and self.args.subcmd != 'config':
-			print('create config file first',file=sys.stderr)
+			self.msg('create config file first')
 			sys.exit(1)
 
 	def create_config(self):
 		cf = boto3.client('cloudformation')
 		if not stack_exists(cf, self.args.stack_name):
-			print('stack not found',file=sys.stderr)
+			self.msg('stack not found')
 			sys.exit(1)
 		bucket, key = s3_split_path(self.args.prefix)
 		s3 = boto3.client('s3')
 		if not bucket_exists(s3, bucket):
-			print('cant access bucket: '+bucket,file=sys.stderr)
+			self.msg('cant access bucket: '+bucket)
 			sys.exit(1)
 
 		self.conf['cache'] = self.args.cache
@@ -130,7 +135,7 @@ class HD:
 		output_keys = ['jobQueueUrl','logGroupName','workerProfileArn','securityGroupId']
 		for o in r['Stacks'][0]['Outputs']:
 			if o['OutputKey'] not in output_keys:
-				print('Stack dont match expected outputs',file=sys.stderr)
+				self.msg('Stack dont match expected outputs')
 				sys.exit(1)
 			self.conf[o['OutputKey']] = o['OutputValue']
 		self.conf['stackName'] = self.args.stack_name
@@ -152,7 +157,7 @@ class HD:
 			if self.cache.vget(section='jobs', id=i, key='status') in HD.job_end_states:
 				self.cache.vdel(section='jobs', id=i)
 
-	def find_instances_req(self,n_cpus, mem_mb):
+	def find_instances_req(self,n_cpus, mem_mb, storage_gb):
 		cpus = set(map(lambda k:k[0],
 			self.cache.select('select id from kvstore where section=? and key=? and value>=?',
 			('instance_types','cpus',n_cpus))))
@@ -176,7 +181,7 @@ class HD:
 	def get_instances_info(self):
 		its = self.cache.allids(section='instance_types')
 		if len(its)>0: return
-		print('getting instance-type data ... ', end='', file=sys.stderr)
+		self.msg('getting instance-type data ... ', end='')
 
 		def it_filter(it):
 			if 'x86_64' not in it['ProcessorInfo']['SupportedArchitectures']: return False
@@ -200,8 +205,14 @@ class HD:
 		its = list(filter(it_filter, its))
 		for i in its:
 			k = i['InstanceType']
-			self.cache.dput(section='instance_types', id=k, kwargs={ 'cpus': i['VCpuInfo']['DefaultVCpus'], 'mem_mb': i['MemoryInfo']['SizeInMiB']})
-		print('done', file=sys.stderr)
+			storage_gb = 0
+			if 'InstanceStorageInfo' in i: storage_gb = i['InstanceStorageInfo']['TotalSizeInGB']
+			self.cache.dput(section='instance_types', id=k, kwargs={
+				'cpus': i['VCpuInfo']['DefaultVCpus'],
+				'mem_mb': i['MemoryInfo']['SizeInMiB'],
+				'storage_gb': storage_gb
+			})
+		self.msg('done', head=False)
 
 	def get_spot_prices(self):
 		t1 = datetime.datetime.now()
@@ -212,7 +223,7 @@ class HD:
 				return
 
 		self.cache.vput(section='meta', id='spot_prices', key='time', value=t1)
-		print('refreshing spot prices ... ', file=sys.stderr, end='')
+		self.msg('refreshing spot prices ... ', end='')
 		ec2 = boto3.client('ec2')
 		instance_list = self.cache.allids(section='instance_types')
 		args = {
@@ -239,12 +250,12 @@ class HD:
 		for it in prices.keys():
 			for az in prices[it].keys():
 				self.cache.vput(section='spot_prices', id=it, key=az, value=prices[it][az]['price'])
-		print('done', file=sys.stderr)
+		self.msg('done', head=False)
 
 	def _host_userscript(self, jobid):
 		host_file = os.path.join(sys.path[0], 'host.py')
 		if not os.path.exists(host_file):
-			print('cant find host script: {}'.format(host_file), file=sys.stderr)
+			self.msg('cant find host script: {}'.format(host_file))
 		script = open(host_file).read()
 		script = script.replace("<JOBID>", jobid)
 		script = script.replace("<SQSURL>", self.conf['jobQueueUrl'])
@@ -263,8 +274,7 @@ class HD:
 			)
 		except Exception as e:
 			if e.__class__.__name__ == 'ResourceInUseException' or e.__class__.__name__ == 'ResourceNotFoundException':
-				print(e)
-				print('no log data', file=sys.stderr)
+				self.msg('no log data')
 				sys.exit(1)
 			else:
 				raise e
@@ -314,8 +324,8 @@ class HD:
 		t0 = self.cache.vget(section='meta', id='status', key='time')
 		if t0 is not None: t0 = str2dt(t0)
 		if t0 is None or (t1-t0).total_seconds() > 6:
-			self.sqs_check_messages()
 			self.cache.vput(section='meta', id='status', key='time', value=t1)
+			self.sqs_check_messages()
 
 		st = self.cache.vget(section='jobs', id=self.args.jobid, key='status')
 		if st in HD.job_end_states:
@@ -347,7 +357,7 @@ class HD:
 
 	def req_instance(self, jobid, jobname, vcpus, mem_mb, vol_size):
 		ec2 = boto3.client('ec2')
-		its = self.find_instances_req(vcpus, mem_mb)
+		its = self.find_instances_req(vcpus, mem_mb, vol_size)
 		its = self.find_lowest_price(its)
 		instance = random.choice(its)
 		sys.stderr.write(str(instance)+'\n')
