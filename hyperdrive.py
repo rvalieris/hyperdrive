@@ -59,7 +59,7 @@ class Cache:
 		c = sqlite3.connect(
 			self.db_path,
 			timeout=datetime.timedelta(minutes=10).total_seconds(),
-			isolation_level=None
+			isolation_level=None # autocommit mode
 		)
 		c.row_factory = sqlite3.Row
 		return c
@@ -237,7 +237,7 @@ class HD:
 		with self.cache.open() as db:
 			for it in prices.keys():
 				for az in prices[it].keys():
-					db.execute('insert into spot_prices (it,az,price) values(?,?,?)',
+					db.execute('insert or replace into spot_prices (it,az,price) values(?,?,?)',
 					(it,az, prices[it][az]['price']))
 		self.msg('done', head=False)
 
@@ -329,7 +329,7 @@ class HD:
 		else:
 			print(self.spot_check_status(self.args.jobid))
 
-	def get_job_properties(self, jobpath):
+	def get_job_info(self, jobpath):
 		job_properties = read_job_properties(jobpath)
 		mem_mb = 500
 		if 'resources' in job_properties:
@@ -349,7 +349,7 @@ class HD:
 
 	def submit_job(self):
 		jobid = str(uuid.uuid4())
-		job_info = self.get_job_properties(self.args.jobscript)
+		job_info = self.get_job_info(self.args.jobscript)
 		s3 = boto3.client('s3')
 		bucket, pkey = s3_split_path(self.conf['prefix'])
 		s3.upload_file(self.args.jobscript, bucket, os.path.join(pkey,'_jobs',jobid))
@@ -370,10 +370,7 @@ class HD:
 			{'Key': 'HD-Prefix', 'Value': self.conf['prefix'] },
 			{'Key': 'HD-Stack', 'Value': self.conf['stackName'] }
 		]
-		block_devices = [{
-			'DeviceName': '/dev/xvda',
-			'Ebs': { 'VolumeSize': 3, 'VolumeType': 'gp2' }
-		}]
+		block_devices = []
 		if instance['extra_ebs'] > 0:
 			block_devices.append({
 				'DeviceName': '/dev/xvdz',
@@ -398,7 +395,7 @@ class HD:
 			]
 		)
 		r = r['Instances'][0]
-		sir_id = r['SpotInstanceRequestId']
+		#sir_id = r['SpotInstanceRequestId']
 		instance_id = r['InstanceId']
 		if instance_id is None or instance_id == '':
 			raise Exception(r)
@@ -407,7 +404,6 @@ class HD:
 		with self.cache.open() as db:
 			db.execute('insert into jobs (jobid,jobname,status,start_time,instance_id) values(?,?,?,?,?)',
 			(jobid, job_info['jobname'], 'RUNNING', now, instance_id))
-		return True
 
 	def main(self):
 		if self.args.subcmd == 'snakemake':
