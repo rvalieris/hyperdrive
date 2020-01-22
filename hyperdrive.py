@@ -24,12 +24,12 @@ def pp_table(data):
 	ms = list(map(len, data[0]))
 	for r in data:
 		for i in range(0,len(r)):
-			if r[i] is None: r[i] = ""
-			if not isinstance(r[i],str): r[i] = str(r[i])
-			ms[i] = max(ms[i], len(r[i]))
+			if r[i] is None: ms[i] = max(0, ms[i])
+			elif not isinstance(r[i],str): ms[i] = len(str(r[i]))
+			else: ms[i] = max(ms[i], len(r[i]))
 	rf = "  ".join(map(lambda i: "{:"+str(i)+"}", ms))
 	for r in data:
-		print(rf.format(*r))
+		print(rf.format(*(map(str,r))))
 
 def stack_exists(cf_client,stackname):
 	try:
@@ -53,35 +53,24 @@ def s3_split_path(path):
 
 class Cache:
 	def __init__(self, fname):
-		self.c = sqlite3.connect(fname, timeout=datetime.timedelta(minutes=10).total_seconds())
-		self.c.execute('create table if not exists kvstore (section,id,key,value, PRIMARY KEY(section,id,key))')
-		self.c.commit()
-	def vput(self, section, id, key, value):
-		self.c.execute('insert or replace into kvstore values(?,?,?,?)', (section, id, key, value))
-		self.c.commit()
-	def dput(self, section, id, kwargs):
-		for k in kwargs.keys():
-			self.vput(section, id, k, kwargs[k])
-	def allids(self, section):
-		ids = []
-		for row in self.c.execute('select distinct id from kvstore where section=?',(section,)):
-			ids.append(row[0])
-		return ids
-	def select(self, query, values):
-		for row in self.c.execute(query, values):
-			yield row
-	def vget(self, section, id, key):
-		cur = self.c.execute('select value from kvstore where section = ? and id=? and key=?', (section, id, key))
-		r = cur.fetchone()
-		if r is not None: return r[0]
-		else: return None
-	def lget(self, section, ids, keys):
-		for i in ids:
-			for k in keys:
-				yield self.vget(section, i, k)
-	def vdel(self, section, id):
-		self.c.execute('delete from kvstore where section = ? and id=?', (section,id))
-		self.c.commit()
+		self.db_path = fname
+		self._create_db()
+	def open(self):
+		c = sqlite3.connect(
+			self.db_path,
+			timeout=datetime.timedelta(minutes=10).total_seconds(),
+			isolation_level=None
+		)
+		c.row_factory = sqlite3.Row
+		return c
+	def _create_db(self):
+		with self.open() as db:
+			n, = db.execute('select count(*) from sqlite_master where type=? and name=?',('table','jobs')).fetchone()
+			if n>0: return
+			db.execute('create table if not exists jobs (jobid, jobname, status, instance_id, start_time, end_time, PRIMARY KEY(jobid))')
+			db.execute('create table if not exists spot_prices (it, az, price, PRIMARY KEY(it,az))')
+			db.execute('create table if not exists instance_types (it, cpus, mem_mb, storage_gb, PRIMARY KEY(it))')
+			db.execute('create table if not exists meta (key, value, PRIMARY KEY(key))')
 
 class HD:
 	job_end_states = ['SUCCESS','FAILED']
@@ -141,36 +130,32 @@ class HD:
 		self.conf['stackName'] = self.args.stack_name
 		yaml.dump(self.conf, open(self.args.config,'w'))
 
-	def stop_instance(self, req_id, instance_id):
-		ec2.cancel_spot_instance_requests(SpotInstanceRequestIds=[req_id])
-		ec2.terminate_instances(InstanceIds=[instance_id])
-
 	def kill_job(self):
-		self.cache.vput(section='jobs', id=self.args.jobid, key='status', value='FAILED')
-		sir_id = self.cache.vget(section='jobs', id=self.args.jobid, key='sir')
-		instance_id = self.cache.vget(section='jobs', id=self.args.jobid, key='instance_id')
-		self.stop_instance(sir_id, instance_id)
+		with self.cache.open() as db:
+			db.execute('update jobs set status=? where jobid=?',('FAILED',self.args.jobid))
+			it, = db.execute('select instance_id from jobs where jobid=?',(jobid,)).fetchone()
+			ec2.terminate_instances(InstanceIds=[it])
 
 	def clean_cache(self):
-		jobids = self.cache.allids(section='jobs')
-		for i in jobids:
-			if self.cache.vget(section='jobs', id=i, key='status') in HD.job_end_states:
-				self.cache.vdel(section='jobs', id=i)
+		with self.cache.open() as db:
+			for jobid, st in db.execute('select jobid, status from jobs'):
+				if st in HD.job_end_states:
+					db.execute('delete from jobs where jobid=?',(jobid,))
 
 	def find_instances_req(self, n_cpus, mem_mb, storage_gb):
-		cpus = set(map(lambda k:k[0],self.cache.c.execute('select id from kvstore where section=? and key=? and value>=?',('instance_types','cpus',n_cpus))))
-		mems = set(map(lambda k:k[0],self.cache.c.execute('select id from kvstore where section=? and key=? and value>=?',('instance_types','mem_mb',mem_mb))))
-		l = cpus.intersection(mems)
-		l = dict(self.cache.c.execute('select id,value from kvstore where section=? and key=? and id in ({})'.format(','.join(['?']*len(l))),('instance_types', 'storage_gb', *l)))
+		with self.cache.open() as db:
+			c = db.execute('select it,storage_gb from instance_types where cpus>=? and mem_mb>=?',(n_cpus, mem_mb))
+			l = dict(c.fetchall())
 		return l
 
 	def find_lowest_price(self, instance_list, storage_gb):
 		self.get_spot_prices()
 		ebs_gb_hour = 0.1/(24*30)
 		ls = []
-		for i in instance_list.keys():
-			extra_ebs = max(0,storage_gb - instance_list[i])
-			for az, ec2_hour in self.cache.c.execute('select key,value from kvstore where section=? and id=?',('spot_prices',i)):
+		with self.cache.open() as db:
+			for i in instance_list.keys():
+				extra_ebs = max(0,storage_gb - instance_list[i])
+				az, ec2_hour = db.execute('select az,price from spot_prices where it=?',(i,)).fetchone()
 				total_cost = float(ec2_hour) + extra_ebs*ebs_gb_hour
 				ls.append({'az':az,'it':i,'cost':total_cost, 'extra_ebs': extra_ebs})
 		ls = sorted(ls, key=lambda i:i['cost'])
@@ -178,8 +163,9 @@ class HD:
 		return ls2
 
 	def get_instances_info(self):
-		its = self.cache.allids(section='instance_types')
-		if len(its)>0: return
+		with self.cache.open() as db:
+			n, = db.execute('select count(*) from instance_types').fetchone()
+			if n>0: return
 		self.msg('getting instance-type data ... ', end='')
 
 		def it_filter(it):
@@ -203,29 +189,30 @@ class HD:
 			if 'NextToken' in r and r['NextToken'] != '': args['NextToken'] = r['NextToken']
 			else: break
 		its = list(filter(it_filter, its))
-		for i in its:
-			k = i['InstanceType']
-			storage_gb = 0
-			if 'InstanceStorageInfo' in i: storage_gb = i['InstanceStorageInfo']['TotalSizeInGB']
-			self.cache.dput(section='instance_types', id=k, kwargs={
-				'cpus': i['VCpuInfo']['DefaultVCpus'],
-				'mem_mb': i['MemoryInfo']['SizeInMiB'],
-				'storage_gb': storage_gb
-			})
+		with self.cache.open() as db:
+			for i in its:
+				k = i['InstanceType']
+				storage_gb = 0
+				if 'InstanceStorageInfo' in i: storage_gb = i['InstanceStorageInfo']['TotalSizeInGB']
+				db.execute('insert into instance_types (it,cpus,mem_mb,storage_gb) values(?,?,?,?)',
+				(k, i['VCpuInfo']['DefaultVCpus'], i['MemoryInfo']['SizeInMiB'], storage_gb))
 		self.msg('done', head=False)
 
 	def get_spot_prices(self):
-		t1 = datetime.datetime.now()
-		t0 = self.cache.vget(section='meta', id='spot_prices', key='time')
-		if t0 is not None:
-			t0 = str2dt(t0)
-			if (t1-t0) < datetime.timedelta(minutes=30):
-				return
+		with self.cache.open() as db:
+			t1 = datetime.datetime.now()
+			r = db.execute('select value from meta where key=?', ('spot_prices_time',)).fetchone()
+			if r is not None:
+				t0 = str2dt(r[0])
+				if (t1-t0) < datetime.timedelta(minutes=30):
+					return
+			db.execute('insert or replace into meta (key,value) values(?,?)',('spot_prices_time',t1))
 
-		self.cache.vput(section='meta', id='spot_prices', key='time', value=t1)
 		self.msg('refreshing spot prices ... ', end='')
 		ec2 = boto3.client('ec2')
-		instance_list = self.cache.allids(section='instance_types')
+		with self.cache.open() as db:
+			instance_list = db.execute('select distinct it from instance_types').fetchall()
+			instance_list = list(map(lambda i:i[0], instance_list))
 		args = {
 			'InstanceTypes': instance_list,
 			'MaxResults': 1000,
@@ -247,9 +234,11 @@ class HD:
 			if az not in prices: prices[it][az] = {}
 			if 'time' not in prices[it][az] or i['Timestamp'] > prices[it][az]['time']:
 				prices[it][az] = { 'time': i['Timestamp'], 'price': i['SpotPrice'] }
-		for it in prices.keys():
-			for az in prices[it].keys():
-				self.cache.vput(section='spot_prices', id=it, key=az, value=prices[it][az]['price'])
+		with self.cache.open() as db:
+			for it in prices.keys():
+				for az in prices[it].keys():
+					db.execute('insert into spot_prices (it,az,price) values(?,?,?)',
+					(it,az, prices[it][az]['price']))
 		self.msg('done', head=False)
 
 	def _host_userscript(self, jobid):
@@ -282,20 +271,18 @@ class HD:
 			d = datetime.datetime.fromtimestamp(round(l['timestamp']/1000))
 			print(d,'|',l['message'],end='')
 		print('------')
-		for k in ['status']:
-			v = self.cache.vget(section='jobs', id=self.args.jobid, key=k)
-			if v is not None: print(k+': '+v)
+		with self.cache.open() as db:
+			st, = db.execute('select status from jobs where jobid=?',(self.args.jobid,)).fetchone()
+			print('status: '+st)
 
 	def print_status(self):
-		keys = ['jobid', 'jobname', 'status', 'startedAt', 'sir']
-		jobids = self.cache.allids(section='jobs')
 		data = []
-		for k in jobids:
-			l = list(self.cache.lget(section='jobs', ids=[k], keys=keys[1:]))
-			data.append([k]+l)
-		data = sorted(data, key=lambda k:k[3]) # startedAt
-		data.insert(0, keys) # header
-		pp_table(data)
+		with self.cache.open() as db:
+			data = db.execute('select jobid,jobname,status,start_time,end_time from jobs').fetchall()
+		data = sorted(data, key=lambda k:k['start_time'])
+		if len(data):
+			data.insert(0, data[0].keys()) # header
+			pp_table(data)
 
 	def sqs_check_messages(self):
 		sqs = boto3.client('sqs')
@@ -304,30 +291,39 @@ class HD:
 			MaxNumberOfMessages=10,
 			WaitTimeSeconds=2
 		)
-		if 'Messages' in r:
+		if 'Messages' not in r: return
+		with self.cache.open() as db:
 			for m in r['Messages']:
 				j = json.loads(m['Body'])
-				st = self.cache.vget(section='jobs', id=j['jobid'], key='status')
-				if st is not None:
-					self.cache.vput(section='jobs', id=j['jobid'], key='status', value=j['status'])
-					sqs.delete_message(QueueUrl=self.conf['jobQueueUrl'], ReceiptHandle=m['ReceiptHandle'])
+				r = db.execute('select status from jobs where jobid=?',(j['jobid'],)).fetchone()
+				if r is not None:
+					db.execute('update jobs set status=? where jobid=?',(j['status'],j['jobid']))
+					sqs.delete_message(QueueUrl=self.conf['jobQueueUrl'],
+						ReceiptHandle=m['ReceiptHandle'])
+					if j['status'] in HD.job_end_states:
+						now = datetime.datetime.now().replace(microsecond=0)
+						db.execute('update jobs set end_time=? where jobid=?',(now,j['jobid']))
 
 	def spot_check_status(self, jobid):
-		#sir_id = self.cache.vget(section='jobs', id=jobid, key='sir')
-		#instance_id = self.cache.vget(section='jobs', id=jobid, key='instance_id')
 		#ec2 = boto3.client('ec2')
 		# TODO: check instance status
 		return 'running'
 
 	def smk_status(self):
-		t1 = datetime.datetime.now()
-		t0 = self.cache.vget(section='meta', id='status', key='time')
-		if t0 is not None: t0 = str2dt(t0)
-		if t0 is None or (t1-t0).total_seconds() > 6:
-			self.cache.vput(section='meta', id='status', key='time', value=t1)
-			self.sqs_check_messages()
+		with self.cache.open() as db:
+			t1 = datetime.datetime.now()
+			r = db.execute('select value from meta where key=?',('status_time',)).fetchone()
+			t0 = None
+			if r is not None: t0 = str2dt(r[0])
+			if t0 is None or (t1-t0).total_seconds() > 6:
+				db.execute('insert or replace into meta values(?,?)',('status_time',t1))
+				self.sqs_check_messages()
+			r = db.execute('select status from jobs where jobid=?', (self.args.jobid,)).fetchone()
+			if r is None:
+				self.msg('job not found')
+				sys.exit(1)
+			st = r[0]
 
-		st = self.cache.vget(section='jobs', id=self.args.jobid, key='status')
 		if st in HD.job_end_states:
 			print(st.lower())
 		else:
@@ -406,7 +402,11 @@ class HD:
 		instance_id = r['InstanceId']
 		if instance_id is None or instance_id == '':
 			raise Exception(r)
-		self.cache.dput(section='jobs', id=jobid, kwargs={'jobname':job_info['jobname'], 'status': 'RUNNING', 'startedAt':datetime.datetime.now(), 'sir': sir_id, 'instance_id': instance_id })
+
+		now = datetime.datetime.now().replace(microsecond=0)
+		with self.cache.open() as db:
+			db.execute('insert into jobs (jobid,jobname,status,start_time,instance_id) values(?,?,?,?,?)',
+			(jobid, job_info['jobname'], 'RUNNING', now, instance_id))
 		return True
 
 	def main(self):
@@ -431,7 +431,7 @@ class HD:
 				'--no-shared-fs',
 				'--use-conda',
 				'--use-singularity',
-				'--max-status-checks-per-second', '10',
+				'--max-status-checks-per-second', '1',
 				'--cluster', self.pname+" submit-job",
 				'--cluster-status', self.pname+" smk-status",
 				'--jobs',str(10**6)
