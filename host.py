@@ -85,9 +85,12 @@ def setup_storage():
 	if len(disk_names)>1:
 		p=subprocess.Popen(['yes'],stdout=subprocess.PIPE)
 		subprocess.run(['mdadm','-C','--force',device,'--level=0','-n',str(len(disks))]+disk_names,stdin=p.stdout)
-	else:
+	elif len(disk_names)==1:
 		device = disk_names[0]
-	
+	else:
+		print('hyperdrive: no scratch disk found')
+		return
+
 	# 3. mount /tmp
 	subprocess.run(['mkfs.xfs','-f',device])
 	subprocess.run(['mv','/tmp/ec2-user','/home/'])
