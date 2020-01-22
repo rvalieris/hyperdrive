@@ -165,6 +165,7 @@ class HD:
 		return l
 
 	def find_lowest_price(self, instance_list, storage_gb):
+		self.get_spot_prices()
 		ebs_gb_hour = 0.1/(24*30)
 		ls = []
 		for i in instance_list.keys():
@@ -183,6 +184,7 @@ class HD:
 
 		def it_filter(it):
 			if 'x86_64' not in it['ProcessorInfo']['SupportedArchitectures']: return False
+			if 'SustainedClockSpeedInGhz' not in it['ProcessorInfo']: return False
 			if 'spot' not in it['SupportedUsageClasses']: return False
 			if 'ebs' not in it['SupportedRootDeviceTypes']: return False
 			if 'GpuInfo' in it: return False
@@ -311,8 +313,8 @@ class HD:
 					sqs.delete_message(QueueUrl=self.conf['jobQueueUrl'], ReceiptHandle=m['ReceiptHandle'])
 
 	def spot_check_status(self, jobid):
-		sir_id = self.cache.vget(section='jobs', id=jobid, key='sir')
-		instance_id = self.cache.vget(section='jobs', id=jobid, key='instance_id')
+		#sir_id = self.cache.vget(section='jobs', id=jobid, key='sir')
+		#instance_id = self.cache.vget(section='jobs', id=jobid, key='instance_id')
 		#ec2 = boto3.client('ec2')
 		# TODO: check instance status
 		return 'running'
@@ -331,39 +333,43 @@ class HD:
 		else:
 			print(self.spot_check_status(self.args.jobid))
 
-	def submit_job(self):
-		jobid = str(uuid.uuid4())
-		job_properties = read_job_properties(self.args.jobscript)
-		jobname = "hd-{}-{}".format(job_properties['rule'], job_properties['jobid'])
-		s3 = boto3.client('s3')
-		bucket, pkey = s3_split_path(self.conf['prefix'])
-		s3.upload_file(self.args.jobscript, bucket, os.path.join(pkey,'_jobs',jobid))
-
+	def get_job_properties(self, jobpath):
+		job_properties = read_job_properties(jobpath)
 		mem_mb = 500
 		if 'resources' in job_properties:
 			if 'mem_mb' in job_properties['resources']: mem_mb = job_properties['resources']['mem_mb']
 			elif 'mem_gb' in job_properties['resources']: mem_mb = 1024*job_properties['resources']['mem_gb']
-
 		disk_gb = 0
 		if 'resources' in job_properties:
 			if 'disk_gb' in job_properties['resources']: disk_gb = job_properties['resources']['disk_gb']
 			elif 'disk_mb' in job_properties['resources']: disk_gb = math.ceil(job_properties['resources']['disk_mb']/1024)
+		jobname = "hd-{}-{}".format(job_properties['rule'], job_properties['jobid'])
+		return {
+			'jobname': jobname,
+			'mem_mb': mem_mb,
+			'disk_gb': disk_gb,
+			'cpus': job_properties.get('threads',1)
+		}
 
-		self.req_instance(jobid=jobid, jobname=jobname, vcpus=job_properties.get('threads', 1), mem_mb=mem_mb, storage_gb=disk_gb)
+	def submit_job(self):
+		jobid = str(uuid.uuid4())
+		job_info = self.get_job_properties(self.args.jobscript)
+		s3 = boto3.client('s3')
+		bucket, pkey = s3_split_path(self.conf['prefix'])
+		s3.upload_file(self.args.jobscript, bucket, os.path.join(pkey,'_jobs',jobid))
+
+		self.req_instance(jobid, job_info)
 		print(jobid)
 
-	def req_instance(self, jobid, jobname, vcpus, mem_mb, storage_gb):
+	def req_instance(self, jobid, job_info):
 		ec2 = boto3.client('ec2')
-		its = self.find_instances_req(vcpus, mem_mb, storage_gb)
-		its = self.find_lowest_price(its, storage_gb)
+		its = self.find_instances_req(job_info['cpus'], job_info['mem_mb'], job_info['disk_gb'])
+		its = self.find_lowest_price(its, job_info['disk_gb'])
 		instance = random.choice(its)
 		sys.stderr.write(str(instance)+'\n')
-		it = instance['it']
-		az = instance['az']
-		extra_ebs = instance['extra_ebs']
 		userdata = self._host_userscript(jobid)
 		tags = [
-			{'Key': 'Name', 'Value': jobname },
+			{'Key': 'Name', 'Value': job_info['jobname'] },
 			{'Key': 'HD-JobId', 'Value': jobid },
 			{'Key': 'HD-Prefix', 'Value': self.conf['prefix'] },
 			{'Key': 'HD-Stack', 'Value': self.conf['stackName'] }
@@ -372,17 +378,17 @@ class HD:
 			'DeviceName': '/dev/xvda',
 			'Ebs': { 'VolumeSize': 3, 'VolumeType': 'gp2' }
 		}]
-		if extra_ebs > 0:
+		if instance['extra_ebs'] > 0:
 			block_devices.append({
 				'DeviceName': '/dev/xvdz',
-				'Ebs': { 'VolumeSize': extra_ebs, 'VolumeType': 'gp2' }
+				'Ebs': { 'VolumeSize': instance['extra_ebs'], 'VolumeType': 'gp2' }
 			})
 		r = ec2.run_instances(
 			MinCount=1, MaxCount=1,
 			SecurityGroupIds=[self.conf['securityGroupId']],
 			ImageId=self.conf['amiId'],
-			InstanceType=it,
-			Placement={ 'AvailabilityZone': az },
+			InstanceType=instance['it'],
+			Placement={ 'AvailabilityZone': instance['az'] },
 			UserData=userdata,
 			IamInstanceProfile={ 'Arn': self.conf['workerProfileArn']},
 			BlockDeviceMappings=block_devices,
@@ -400,7 +406,7 @@ class HD:
 		instance_id = r['InstanceId']
 		if instance_id is None or instance_id == '':
 			raise Exception(r)
-		self.cache.dput(section='jobs', id=jobid, kwargs={'jobname':jobname, 'status': 'RUNNING', 'startedAt':datetime.datetime.now(), 'sir': sir_id, 'instance_id': instance_id })
+		self.cache.dput(section='jobs', id=jobid, kwargs={'jobname':job_info['jobname'], 'status': 'RUNNING', 'startedAt':datetime.datetime.now(), 'sir': sir_id, 'instance_id': instance_id })
 		return True
 
 	def main(self):
