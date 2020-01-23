@@ -191,7 +191,7 @@ class HD:
 			if it['BurstablePerformanceSupported']: return False
 			return True
 
-		features_file = os.path.join(sys.path[0], 'it_features.json')
+		features_file = os.path.join(sys.path[0], 'share', 'it_features.json')
 		features = json.load(open(features_file))
 
 		ec2 = boto3.client('ec2')
@@ -259,7 +259,7 @@ class HD:
 		self.msg('done', head=False)
 
 	def _host_userscript(self, jobid):
-		host_file = os.path.join(sys.path[0], 'host.py')
+		host_file = os.path.join(sys.path[0], 'share', 'host.py')
 		if not os.path.exists(host_file):
 			self.msg('cant find host script: {}'.format(host_file))
 		script = open(host_file).read()
