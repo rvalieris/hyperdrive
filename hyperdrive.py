@@ -166,9 +166,9 @@ class HD:
 		with self.cache.open() as db:
 			for i in instance_list.keys():
 				extra_ebs = max(0,storage_gb - instance_list[i])
-				az, ec2_hour = db.execute('select az,price from spot_prices where it=?',(i,)).fetchone()
-				total_cost = float(ec2_hour) + extra_ebs*ebs_gb_hour
-				ls.append({'az':az,'it':i,'cost':total_cost, 'extra_ebs': extra_ebs})
+				for az, ec2_hour in db.execute('select az,price from spot_prices where it=?',(i,)):
+					total_cost = float(ec2_hour) + extra_ebs*ebs_gb_hour
+					ls.append({'az':az,'it':i,'cost':total_cost, 'extra_ebs': extra_ebs})
 		ls = sorted(ls, key=lambda i:i['cost'])
 		ls2 = list(filter(lambda i: i['cost']<=ls[0]['cost'], ls))
 		return ls2
