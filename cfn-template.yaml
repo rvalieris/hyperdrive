@@ -8,7 +8,26 @@ Outputs:
     Value: !Ref JobLogs
   securityGroupId:
     Value: !GetAtt SecurityGroup.GroupId
+  group:
+    Value: !Ref IAMGroup
 Resources:
+  IAMGroup:
+    Type: 'AWS::IAM::Group'
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSQSFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonEC2FullAccess'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess'
+        - 'arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess'
+      Policies:
+        - PolicyName: PassRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'iam:PassRole'
+                Resource: '*'
   SecurityGroup:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
