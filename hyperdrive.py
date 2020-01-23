@@ -71,6 +71,7 @@ class Cache:
 			db.execute('create table if not exists spot_prices (it, az, price, PRIMARY KEY(it,az))')
 			db.execute('create table if not exists instance_types (it, cpus, mem_mb, storage_gb, PRIMARY KEY(it))')
 			db.execute('create table if not exists meta (key, value, PRIMARY KEY(key))')
+			db.execute('create table if not exists it_features (it, key, value, PRIMARY KEY(it,key))')
 
 class HD:
 	job_end_states = ['SUCCESS','FAILED']
@@ -142,10 +143,20 @@ class HD:
 				if st in HD.job_end_states:
 					db.execute('delete from jobs where jobid=?',(jobid,))
 
-	def find_instances_req(self, n_cpus, mem_mb, storage_gb):
+	def find_instances_req(self, job_info):
+		n_cpus = job_info['cpus']
+		mem_mb = job_info['mem_mb']
 		with self.cache.open() as db:
 			c = db.execute('select it,storage_gb from instance_types where cpus>=? and mem_mb>=?',(n_cpus, mem_mb))
 			l = dict(c.fetchall())
+			c = db.execute('select distinct key from it_features')
+			features = list(map(lambda i:i[0],c.fetchall()))
+			for k in job_info['resources'].keys():
+				if k not in features: continue
+				c = db.execute('select it from it_features where key=? and value>=?',
+				(k,job_info['resources'][k]))
+				l2 = list(map(lambda i:i[0],c.fetchall()))
+				l = dict(filter(lambda i: i[0] in l2, l.items()))
 		return l
 
 	def find_lowest_price(self, instance_list, storage_gb):
@@ -180,6 +191,9 @@ class HD:
 			if it['BurstablePerformanceSupported']: return False
 			return True
 
+		features_file = os.path.join(sys.path[0], 'it_features.json')
+		features = json.load(open(features_file))
+
 		ec2 = boto3.client('ec2')
 		its = []
 		args = {}
@@ -193,6 +207,9 @@ class HD:
 			for i in its:
 				k = i['InstanceType']
 				storage_gb = 0
+				if k in features:
+					for f in features[k].keys():
+						db.execute('insert into it_features values(?,?,?)',(k,f,features[k][f]))
 				if 'InstanceStorageInfo' in i: storage_gb = i['InstanceStorageInfo']['TotalSizeInGB']
 				db.execute('insert into instance_types (it,cpus,mem_mb,storage_gb) values(?,?,?,?)',
 				(k, i['VCpuInfo']['DefaultVCpus'], i['MemoryInfo']['SizeInMiB'], storage_gb))
@@ -332,11 +349,10 @@ class HD:
 	def get_job_info(self, jobpath):
 		job_properties = read_job_properties(jobpath)
 		mem_mb = 500
+		disk_gb = 0
 		if 'resources' in job_properties:
 			if 'mem_mb' in job_properties['resources']: mem_mb = job_properties['resources']['mem_mb']
 			elif 'mem_gb' in job_properties['resources']: mem_mb = 1024*job_properties['resources']['mem_gb']
-		disk_gb = 0
-		if 'resources' in job_properties:
 			if 'disk_gb' in job_properties['resources']: disk_gb = job_properties['resources']['disk_gb']
 			elif 'disk_mb' in job_properties['resources']: disk_gb = math.ceil(job_properties['resources']['disk_mb']/1024)
 		jobname = "hd-{}-{}".format(job_properties['rule'], job_properties['jobid'])
@@ -344,7 +360,8 @@ class HD:
 			'jobname': jobname,
 			'mem_mb': mem_mb,
 			'disk_gb': disk_gb,
-			'cpus': job_properties.get('threads',1)
+			'cpus': job_properties.get('threads',1),
+			'resources': job_properties.get('resources',{})
 		}
 
 	def submit_job(self):
@@ -359,7 +376,7 @@ class HD:
 
 	def req_instance(self, jobid, job_info):
 		ec2 = boto3.client('ec2')
-		its = self.find_instances_req(job_info['cpus'], job_info['mem_mb'], job_info['disk_gb'])
+		its = self.find_instances_req(job_info)
 		its = self.find_lowest_price(its, job_info['disk_gb'])
 		instance = random.choice(its)
 		sys.stderr.write(str(instance)+'\n')
@@ -433,10 +450,10 @@ class HD:
 				'--jobs',str(10**6)
 				]+self.extra_args
 			)
-	
+
 		elif self.args.subcmd == 'smk-status':
 			self.smk_status()
-	
+
 		elif self.args.subcmd == 'submit-job':
 			self.submit_job()
 
