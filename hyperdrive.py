@@ -50,6 +50,16 @@ def s3_split_path(path):
 	else:
 		return path.split('/',1)
 
+def boto3_all_results(function, key, **kwargs):
+	r = function(**kwargs)
+	rs = r[key]
+	nt = r.get('NextToken', None)
+	while nt is not None and nt != '':
+		r = function(NextToken=nt, **kwargs)
+		rs.extend(r[key])
+		nt = r.get('NextToken', None)
+	return rs
+
 class Cache:
 	def __init__(self, fname):
 		self.db_path = fname
@@ -81,7 +91,6 @@ class Cache:
 			db.execute('create table if not exists jobs (jobid, jobname, status, instance_id, start_time, end_time, PRIMARY KEY(jobid))')
 			db.execute('create table if not exists spot_prices (it, az, price, backoff, PRIMARY KEY(it,az))')
 			db.execute('create table if not exists instance_types (it, cpus, mem_mb, storage_gb, PRIMARY KEY(it))')
-			db.execute('create table if not exists meta (key, value, PRIMARY KEY(key))')
 			db.execute('create table if not exists it_features (it, key, value, PRIMARY KEY(it,key))')
 			db.execute('create table if not exists timed_locks (key, dt, PRIMARY KEY(key))')
 
@@ -117,7 +126,7 @@ class HD:
 			self.conf = yaml.safe_load(open(self.args.config))
 			self.cache = Cache(self.conf['cache'])
 		elif self.args.subcmd is not None and self.args.subcmd != 'config':
-			self.msg('create config file first')
+			self.msg('run "{} config" first'.format(self.pname))
 			sys.exit(1)
 
 	def create_config(self):
@@ -134,7 +143,7 @@ class HD:
 		self.conf['cache'] = self.args.cache
 		self.conf['prefix'] = self.args.prefix
 		r = cf.describe_stacks(StackName=self.args.stack_name)
-		output_keys = ['jobQueueUrl','logGroupName','workerProfileArn','securityGroupId']
+		output_keys = ['jobQueueUrl','logGroupName','workerProfileArn','securityGroupId','group']
 		for o in r['Stacks'][0]['Outputs']:
 			if o['OutputKey'] not in output_keys:
 				self.msg('Stack dont match expected outputs')
@@ -174,7 +183,7 @@ class HD:
 
 	def find_lowest_price(self, instance_list, storage_gb):
 		self.get_spot_prices()
-		ebs_gb_hour = 0.1/(24*30)
+		ebs_gb_hour = 0.1/(24*30) # TODO
 		ls = []
 		with self.cache.open() as db:
 			for i in instance_list.keys():
@@ -208,13 +217,8 @@ class HD:
 		features = json.load(open(features_file))
 
 		ec2 = boto3.client('ec2')
-		its = []
-		args = {}
-		while True:
-			r = ec2.describe_instance_types(**args)
-			its.extend(r['InstanceTypes'])
-			if 'NextToken' in r and r['NextToken'] != '': args['NextToken'] = r['NextToken']
-			else: break
+		its = boto3_all_results(ec2.describe_instance_types, 'InstanceTypes')
+
 		its = list(filter(it_filter, its))
 		with self.cache.open() as db:
 			for i in its:
@@ -237,19 +241,14 @@ class HD:
 		with self.cache.open() as db:
 			instance_list = db.execute('select distinct it from instance_types').fetchall()
 			instance_list = list(map(lambda i:i[0], instance_list))
-		args = {
-			'InstanceTypes': instance_list,
-			'MaxResults': 1000,
-			'StartTime':datetime.datetime.utcnow(),
-			'EndTime':datetime.datetime.utcnow(),
-			'ProductDescriptions': ['Linux/UNIX (Amazon VPC)']
-		}
-		rs = []
-		while True:
-			r = ec2.describe_spot_price_history(**args)
-			rs.extend(r['SpotPriceHistory'])
-			if 'NextToken' in r and r['NextToken'] != '': args['NextToken'] = r['NextToken']
-			else: break
+
+		rs = boto3_all_results(ec2.describe_spot_price_history, 'SpotPriceHistory',
+			InstanceTypes=instance_list,
+			MaxResults=1000,
+			StartTime=datetime.datetime.utcnow(),
+			EndTime=datetime.datetime.utcnow(),
+			ProductDescriptions=['Linux/UNIX (Amazon VPC)']
+		)
 		prices = {}
 		for i in rs:
 			it = i['InstanceType']
