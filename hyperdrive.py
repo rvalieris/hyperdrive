@@ -57,11 +57,23 @@ class Cache:
 	def open(self):
 		c = sqlite3.connect(
 			self.db_path,
-			timeout=datetime.timedelta(minutes=10).total_seconds(),
+			timeout=10*60, # 10 minutes
 			isolation_level=None # autocommit mode
 		)
 		c.row_factory = sqlite3.Row
 		return c
+	def timed_lock(self, key, delta_seconds):
+		with self.open() as db:
+			db.execute('BEGIN EXCLUSIVE')
+			t1 = datetime.datetime.now()
+			r = db.execute('select dt from timed_locks where key=?',(key,)).fetchone()
+			t0 = str2dt(r[0]) if r is not None else None
+			if t0 is None or (t1-t0).total_seconds() > delta_seconds:
+				db.execute('insert or replace into timed_locks values(?,?)',(key,t1))
+				db.execute('END')
+				return True
+			db.execute('END')
+			return False
 	def _create_db(self):
 		with self.open() as db:
 			n, = db.execute('select count(*) from sqlite_master where type=? and name=?',('table','jobs')).fetchone()
@@ -71,6 +83,7 @@ class Cache:
 			db.execute('create table if not exists instance_types (it, cpus, mem_mb, storage_gb, PRIMARY KEY(it))')
 			db.execute('create table if not exists meta (key, value, PRIMARY KEY(key))')
 			db.execute('create table if not exists it_features (it, key, value, PRIMARY KEY(it,key))')
+			db.execute('create table if not exists timed_locks (key, dt, PRIMARY KEY(key))')
 
 class HD:
 	job_end_states = ['SUCCESS','FAILED']
@@ -216,14 +229,8 @@ class HD:
 		self.msg('done', head=False)
 
 	def get_spot_prices(self):
-		with self.cache.open() as db:
-			t1 = datetime.datetime.now()
-			r = db.execute('select value from meta where key=?', ('spot_prices_time',)).fetchone()
-			if r is not None:
-				t0 = str2dt(r[0])
-				if (t1-t0) < datetime.timedelta(minutes=30):
-					return
-			db.execute('insert or replace into meta (key,value) values(?,?)',('spot_prices_time',t1))
+		if not self.cache.timed_lock('spot_prices', 30*60): # 30 minutes
+			return
 
 		self.msg('refreshing spot prices ... ', end='')
 		ec2 = boto3.client('ec2')
@@ -348,14 +355,10 @@ class HD:
 		return 'running'
 
 	def smk_status(self):
+		if self.cache.timed_lock('status_time', 7):
+			self.sqs_check_messages()
+
 		with self.cache.open() as db:
-			t1 = datetime.datetime.now()
-			r = db.execute('select value from meta where key=?',('status_time',)).fetchone()
-			t0 = None
-			if r is not None: t0 = str2dt(r[0])
-			if t0 is None or (t1-t0).total_seconds() > 6:
-				db.execute('insert or replace into meta values(?,?)',('status_time',t1))
-				self.sqs_check_messages()
 			r = db.execute('select status from jobs where jobid=?', (self.args.jobid,)).fetchone()
 			if r is None:
 				self.msg('job not found')
