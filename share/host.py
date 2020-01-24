@@ -8,6 +8,7 @@ import functools
 import json
 import datetime
 import time
+import psutil
 import inotify_simple
 import multiprocessing
 from snakemake.utils import read_job_properties
@@ -15,7 +16,8 @@ from snakemake.utils import read_job_properties
 print = functools.partial(print, flush=True)
 
 conda_bin_path = '/opt/conda/bin'
-basedir = '/tmp/ec2-user'
+mountdir = '/tmp'
+basedir = os.path.join(mountdir,'ec2-user')
 workflow_path = os.path.join(basedir, 'workflow')
 jobscript_path = os.path.join(basedir, 'job.sh')
 log_path = '/var/log/cloud-init-output.log'
@@ -33,6 +35,7 @@ def get_metadata():
 metadata = get_metadata()
 region = metadata['region']
 instance_id = metadata['instanceId']
+sqs = boto3.client('sqs', region_name=region)
 
 def lsblk():
 	p=subprocess.run(['lsblk','-b','-r','-p'],stdout=subprocess.PIPE)
@@ -94,9 +97,30 @@ def setup_storage():
 	# 3. mount /tmp
 	subprocess.run(['mkfs.xfs','-f',device])
 	subprocess.run(['mv','/tmp/ec2-user','/home/'])
-	subprocess.run(['mount',device,'/tmp'])
-	subprocess.run(['mv','/home/ec2-user','/tmp/'])
-	subprocess.run(['chmod','777','/tmp'])
+	subprocess.run(['mount',device,mountdir])
+	subprocess.run(['mv','/home/ec2-user',mountdir])
+	subprocess.run(['chmod','777',mountdir])
+
+# collect peak metrics while 'p' is running
+def gather_metrics(p):
+	m = psutil.virtual_memory()
+	d = {
+		'tot_mem_mb': m.total/(2**20),
+		'max_mem_mb': (m.total-m.available)/(2**20),
+		'tot_disk_mb': psutil.disk_usage(mountdir).total/(2**20),
+		'max_disk_mb': psutil.disk_usage(mountdir).used/(2**20),
+		'max_cpu_usage': sum(psutil.cpu_percent(interval=1,percpu=True)),
+		'n_cores': psutil.cpu_count()
+	}
+	while True:
+		m = psutil.virtual_memory()
+		d['max_mem_mb'] = max(d['max_mem_mb'], (m.total-m.available)/(2**20))
+		d['max_disk_mb'] = max(d['max_disk_mb'], psutil.disk_usage(mountdir).used/(2**20))
+		d['max_cpu_usage'] = max(d['max_cpu_usage'], sum(psutil.cpu_percent(interval=1,percpu=True)))
+		try:
+			if p.wait(timeout=10) is not None: break
+		except subprocess.TimeoutExpired: pass
+	return d
 
 def run():
 	# setup logging
@@ -105,13 +129,6 @@ def run():
 	setup_storage()
 	# copy jobscript to /root
 	subprocess.run([aws,'s3','cp',os.path.join('s3://',prefix,'_jobs',jobid),jobscript_path])
-
-	#job_properties = read_job_properties(jobscript_path)
-	#job_name = "hd-{}-{}".format(job_properties['rule'], job_properties['jobid'])
-
-	# send message that the job is starting
-	sqs = boto3.client('sqs', region_name=region)
-	#sqs.send_message(QueueUrl=sqs_url, MessageBody=json.dumps({'jobid':jobid,'status':'RUNNING'}))
 
 	# sync workflow
 	subprocess.run([aws,'s3','sync','--no-progress',os.path.join('s3://',prefix,'_workflow'),workflow_path])
@@ -127,9 +144,12 @@ def run():
 	job_env['HOME'] = basedir
 	job_env['PATH'] = conda_bin_path + os.pathsep + job_env['PATH']
 	print('--JOB-START--')
-	#p = subprocess.run(['su','-c','cd workflow;source '+jobscript_path,'--login','ec2-user'])
-	p=subprocess.run(['bash',jobscript_path], preexec_fn=functools.partial(drop_priv, pwr), env=job_env, cwd=workflow_path)
+	p=subprocess.Popen(['bash',jobscript_path], preexec_fn=functools.partial(drop_priv, pwr), env=job_env, cwd=workflow_path)
+	m = gather_metrics(p)
 	print('--JOB-END--')
+	print('peak memory: {:.1f}MB, {:.1f}GB, {:.1f}%'.format(m['max_mem_mb'],m['max_mem_mb']/1024,100*m['max_mem_mb']/m['tot_mem_mb']))
+	print('peak disk: {:.1f}MB, {:.1f}GB, {:.1f}%'.format(m['max_disk_mb'],m['max_disk_mb']/1024,100*m['max_disk_mb']/m['tot_disk_mb']))
+	print('peak cpu: {:.1f}% / {} cores'.format(m['max_cpu_usage'],m['n_cores']))
 
 	if p.returncode == 0:
 		sqs.send_message(QueueUrl=sqs_url, MessageBody=json.dumps({'jobid':jobid,'status':'SUCCESS'}))
@@ -139,10 +159,9 @@ def run():
 if __name__ == '__main__':
 	try:
 		run()
-	except:
-		sqs = boto3.client('sqs', region_name=region)
+	except Exception as e:
+		print(e)
 		sqs.send_message(QueueUrl=sqs_url, MessageBody=json.dumps({'jobid':jobid,'status':'FAILED'}))
-	#subprocess.run([aws,'s3','cp',log_path,os.path.join('s3://',prefix,'_logs',jobid)])
-	time.sleep(2) # give some time for the logging to finish
+	time.sleep(3) # give some time for the logging to finish
 	subprocess.run(['sudo','poweroff'])
 

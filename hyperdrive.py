@@ -132,9 +132,10 @@ class HD:
 		yaml.dump(self.conf, open(self.args.config,'w'))
 
 	def kill_job(self):
+		ec2 = boto3.client('ec2')
 		with self.cache.open() as db:
 			db.execute('update jobs set status=? where jobid=?',('FAILED',self.args.jobid))
-			it, = db.execute('select instance_id from jobs where jobid=?',(jobid,)).fetchone()
+			it, = db.execute('select instance_id from jobs where jobid=?',(self.args.jobid,)).fetchone()
 			ec2.terminate_instances(InstanceIds=[it])
 
 	def clean_cache(self):
@@ -168,7 +169,7 @@ class HD:
 				extra_ebs = max(0,storage_gb - instance_list[i])
 				for az, ec2_hour in db.execute('select az,price from spot_prices where it=?',(i,)):
 					total_cost = float(ec2_hour) + extra_ebs*ebs_gb_hour
-					ls.append({'az':az,'it':i,'cost':total_cost, 'extra_ebs': extra_ebs})
+					ls.append({'az':az,'it':i,'cost':total_cost, 'extra_ebs': extra_ebs, 'instance_storage': instance_list[i]})
 		ls = sorted(ls, key=lambda i:i['cost'])
 		ls2 = list(filter(lambda i: i['cost']<=ls[0]['cost'], ls))
 		return ls2
@@ -324,6 +325,13 @@ class HD:
 	def spot_check_status(self, jobid):
 		#ec2 = boto3.client('ec2')
 		# TODO: check instance status
+
+		# describe_instances
+		# check: State, StateTransitionReason, StateReason
+		# state.name==terminated and StateReason.code=="Client.UserInitiatedShutdown" -> terminated by user
+		# state.name==terminated and StateReason.code=="Client.InstanceInitiatedShutdown" -> terminated by host
+		# StateTransitionReason="User initiated (2020-01-24 13:48:40 GMT)"
+
 		return 'running'
 
 	def smk_status(self):
