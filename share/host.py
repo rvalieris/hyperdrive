@@ -11,7 +11,6 @@ import time
 import psutil
 import inotify_simple
 import multiprocessing
-from snakemake.utils import read_job_properties
 # always flush to keep the log going
 print = functools.partial(print, flush=True)
 
@@ -34,7 +33,6 @@ def get_metadata():
 
 metadata = get_metadata()
 region = metadata['region']
-instance_id = metadata['instanceId']
 sqs = boto3.client('sqs', region_name=region)
 
 def lsblk():
@@ -123,6 +121,7 @@ def gather_metrics(p):
 	return d
 
 def run():
+	t0 = datetime.datetime.now()
 	# setup logging
 	multiprocessing.Process(target=log_watcher).start()
 	# setup storage
@@ -150,6 +149,7 @@ def run():
 	print('peak memory: {:.1f}MB, {:.1f}GB, {:.1f}%'.format(m['max_mem_mb'],m['max_mem_mb']/1024,100*m['max_mem_mb']/m['tot_mem_mb']))
 	print('peak disk: {:.1f}MB, {:.1f}GB, {:.1f}%'.format(m['max_disk_mb'],m['max_disk_mb']/1024,100*m['max_disk_mb']/m['tot_disk_mb']))
 	print('peak cpu: {:.1f}% / {} cores'.format(m['max_cpu_usage'],m['n_cores']))
+	print('total runtime: {}'.format(datetime.datetime.now()-t0))
 
 	if p.returncode == 0:
 		sqs.send_message(QueueUrl=sqs_url, MessageBody=json.dumps({'jobid':jobid,'status':'SUCCESS'}))

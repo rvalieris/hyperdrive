@@ -10,9 +10,8 @@ import yaml
 import sqlite3
 import uuid
 import subprocess
-import itertools
-import boto3
 import random
+import math
 from snakemake.utils import read_job_properties
 import functools
 print = functools.partial(print, flush=True)
@@ -68,7 +67,7 @@ class Cache:
 			n, = db.execute('select count(*) from sqlite_master where type=? and name=?',('table','jobs')).fetchone()
 			if n>0: return
 			db.execute('create table if not exists jobs (jobid, jobname, status, instance_id, start_time, end_time, PRIMARY KEY(jobid))')
-			db.execute('create table if not exists spot_prices (it, az, price, PRIMARY KEY(it,az))')
+			db.execute('create table if not exists spot_prices (it, az, price, backoff, PRIMARY KEY(it,az))')
 			db.execute('create table if not exists instance_types (it, cpus, mem_mb, storage_gb, PRIMARY KEY(it))')
 			db.execute('create table if not exists meta (key, value, PRIMARY KEY(key))')
 			db.execute('create table if not exists it_features (it, key, value, PRIMARY KEY(it,key))')
@@ -167,7 +166,7 @@ class HD:
 		with self.cache.open() as db:
 			for i in instance_list.keys():
 				extra_ebs = max(0,storage_gb - instance_list[i])
-				for az, ec2_hour in db.execute('select az,price from spot_prices where it=?',(i,)):
+				for az, ec2_hour in db.execute('select az,price from spot_prices where it=? and backoff<1',(i,)):
 					total_cost = float(ec2_hour) + extra_ebs*ebs_gb_hour
 					ls.append({'az':az,'it':i,'cost':total_cost, 'extra_ebs': extra_ebs, 'instance_storage': instance_list[i]})
 		ls = sorted(ls, key=lambda i:i['cost'])
@@ -255,8 +254,8 @@ class HD:
 		with self.cache.open() as db:
 			for it in prices.keys():
 				for az in prices[it].keys():
-					db.execute('insert or replace into spot_prices (it,az,price) values(?,?,?)',
-					(it,az, prices[it][az]['price']))
+					db.execute('insert or replace into spot_prices (it,az,price,backoff) values(?,?,?,?)',
+					(it,az, float(prices[it][az]['price']),0))
 		self.msg('done', head=False)
 
 	def _host_userscript(self, jobid):
@@ -294,6 +293,7 @@ class HD:
 			print('status: '+st)
 
 	def print_status(self):
+		# TODO: if status_time > 30s: refresh
 		data = []
 		with self.cache.open() as db:
 			data = db.execute('select jobid,jobname,status,start_time,end_time from jobs').fetchall()
@@ -328,9 +328,22 @@ class HD:
 
 		# describe_instances
 		# check: State, StateTransitionReason, StateReason
-		# state.name==terminated and StateReason.code=="Client.UserInitiatedShutdown" -> terminated by user
-		# state.name==terminated and StateReason.code=="Client.InstanceInitiatedShutdown" -> terminated by host
 		# StateTransitionReason="User initiated (2020-01-24 13:48:40 GMT)"
+
+		# if the instance was terminated by abnormal reason
+		# increase backoff value on spot_prices
+		# and launch a new instance
+
+		# StateReason.code
+		# Client.InstanceInitiatedShutdown -> job finished, by host
+		# Server.InsufficientInstanceCapacity -> new instance on a different instance-type and/or az
+		# Server.SpotInstanceShutdown -> new instance on a different instance-type and/or az
+		# Server.SpotInstanceTermination -> new instance on a different instance-type and/or az
+		# Server.InternalError -> try a new instance ?
+		# Client.UserInitiatedShutdown -> instance killed by EC2 API, set job as failed ?
+		# Client.InstanceTerminate -> ???
+		# Client.InternalError -> ???
+		# Client.VolumeLimitExceeded -> ???
 
 		return 'running'
 
