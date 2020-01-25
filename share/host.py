@@ -11,6 +11,7 @@ import time
 import psutil
 import inotify_simple
 import multiprocessing
+from snakemake.utils import read_job_properties
 # always flush to keep the log going
 print = functools.partial(print, flush=True)
 
@@ -56,20 +57,28 @@ def drop_priv(pwr):
 	os.umask(0o22)
 
 def log_watcher():
+	inotify = inotify_simple.INotify()
 	cwl = boto3.client('logs', region_name=region)
 	cwl.create_log_stream(logGroupName=log_group, logStreamName=jobid)
-	h = open(log_path)
-	inotify = inotify_simple.INotify()
-	wd = inotify.add_watch(log_path, inotify_simple.flags.MODIFY)
-	#h.seek(0,os.SEEK_END) # goto eof
+	jp = read_job_properties(jobscript_path)
+	wait_for_files = dict(map(lambda k: (os.path.join(workflow_path,k),1), jp.get('log',[])))
+	wait_for_files[log_path] = 1
+	watching = {}
 	kvargs = {'logGroupName':log_group, 'logStreamName':jobid}
 	while True:
-		inotify.read(read_delay=1000)
-		t = round(datetime.datetime.now().timestamp()*1000)
-		logs = list(map(lambda l: {'timestamp': t, 'message': l}, h.readlines()))
-		kvargs['logEvents'] = logs
-		r = cwl.put_log_events(**kvargs)
-		kvargs['sequenceToken'] = r['nextSequenceToken']
+		for f in list(wait_for_files.keys()):
+			if os.path.exists(f):
+				wd = inotify.add_watch(f, inotify_simple.flags.MODIFY | inotify_simple.flags.ATTRIB)
+				watching[wd] = open(f)
+				del wait_for_files[f]
+				os.utime(f) # trigger inotify now
+		for e in inotify.read(timeout=5000,read_delay=1000):
+			t = round(datetime.datetime.now().timestamp()*1000)
+			logs = list(map(lambda l: {'timestamp': t, 'message': l}, watching[e.wd].readlines()))
+			if len(logs)>0:
+				kvargs['logEvents'] = logs
+				r = cwl.put_log_events(**kvargs)
+				kvargs['sequenceToken'] = r['nextSequenceToken']
 
 def setup_storage():
 	h = lsblk()
@@ -107,14 +116,14 @@ def gather_metrics(p):
 		'max_mem_mb': (m.total-m.available)/(2**20),
 		'tot_disk_mb': psutil.disk_usage(mountdir).total/(2**20),
 		'max_disk_mb': psutil.disk_usage(mountdir).used/(2**20),
-		'max_cpu_usage': sum(psutil.cpu_percent(interval=1,percpu=True)),
+		'max_cpu_usage': sum(psutil.cpu_percent(percpu=True)),
 		'n_cores': psutil.cpu_count()
 	}
 	while True:
 		m = psutil.virtual_memory()
 		d['max_mem_mb'] = max(d['max_mem_mb'], (m.total-m.available)/(2**20))
 		d['max_disk_mb'] = max(d['max_disk_mb'], psutil.disk_usage(mountdir).used/(2**20))
-		d['max_cpu_usage'] = max(d['max_cpu_usage'], sum(psutil.cpu_percent(interval=1,percpu=True)))
+		d['max_cpu_usage'] = max(d['max_cpu_usage'], sum(psutil.cpu_percent(percpu=True)))
 		try:
 			if p.wait(timeout=10) is not None: break
 		except subprocess.TimeoutExpired: pass
@@ -122,12 +131,12 @@ def gather_metrics(p):
 
 def run():
 	t0 = datetime.datetime.now()
-	# setup logging
-	multiprocessing.Process(target=log_watcher).start()
 	# setup storage
 	setup_storage()
 	# copy jobscript to /root
 	subprocess.run([aws,'s3','cp',os.path.join('s3://',prefix,'_jobs',jobid),jobscript_path])
+	# setup logging
+	multiprocessing.Process(target=log_watcher).start()
 
 	# sync workflow
 	subprocess.run([aws,'s3','sync','--no-progress',os.path.join('s3://',prefix,'_workflow'),workflow_path])
