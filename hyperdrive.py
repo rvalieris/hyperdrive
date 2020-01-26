@@ -308,7 +308,10 @@ class HD:
 			data.insert(0, data[0].keys()) # header
 			pp_table(data)
 
-	def sqs_check_messages(self):
+	def check_sqs_messages(self):
+		if not self.cache.timed_lock('sqs_status', 7):
+			return
+
 		sqs = boto3.client('sqs')
 		r = sqs.receive_message(
 			QueueUrl=self.conf['jobQueueUrl'],
@@ -328,46 +331,68 @@ class HD:
 						now = datetime.datetime.now().replace(microsecond=0)
 						db.execute('update jobs set end_time=? where jobid=?',(now,j['jobid']))
 
-	def spot_check_status(self, jobid):
-		#ec2 = boto3.client('ec2')
-		# TODO: check instance status
+	def check_instance_status(self):
+		if not self.cache.timed_lock('instance_status', 7):
+			return
 
-		# describe_instances
-		# check: State, StateTransitionReason, StateReason
-		# StateTransitionReason="User initiated (2020-01-24 13:48:40 GMT)"
+		instance_ids = {}
+		with self.cache.open() as db:
+			for jobid, st, instance_id in db.execute('select jobid,status,instance_id from jobs'):
+				if st != 'RUNNING': continue
+				instance_ids[instance_id] = jobid
 
-		# if the instance was terminated by abnormal reason
-		# increase backoff value on spot_prices
-		# and launch a new instance
+		if len(instance_ids)==0: return
 
-		# StateReason.code
-		# Client.InstanceInitiatedShutdown -> job finished, by host
-		# Server.InsufficientInstanceCapacity -> new instance on a different instance-type and/or az
-		# Server.SpotInstanceShutdown -> new instance on a different instance-type and/or az
-		# Server.SpotInstanceTermination -> new instance on a different instance-type and/or az
-		# Server.InternalError -> try a new instance ?
-		# Client.UserInitiatedShutdown -> instance killed by EC2 API, set job as failed ?
-		# Client.InstanceTerminate -> ???
-		# Client.InternalError -> ???
-		# Client.VolumeLimitExceeded -> ???
+		ec2 = boto3.client('ec2')
+		r = boto3_all_results(ec2.describe_instances, 'Reservations',
+			InstanceIds=list(instance_ids.keys())
+		)
 
-		return 'running'
+		def increase_it_backoff(instance_type, az):
+			with self.cache.open() as db:
+				db.execute('update spot_prices set backoff = backoff + 1 where it=? and az=?',(instance_type,az))
+		def set_job_status(jobid, status):
+			with self.cache.open() as db:
+				db.execute('update jobs set status = ? where jobid=?',(status,jobid))
 
-	def smk_status(self):
-		if self.cache.timed_lock('status_time', 7):
-			self.sqs_check_messages()
+		backoff_states = ['Server.InsufficientInstanceCapacity','Server.SpotInstanceTermination']
 
+		for i in r:
+			for j in i['Instances']:
+				instance_id = j['InstanceId']
+				it = j['InstanceType']
+				az = j['Placement']['AvailabilityZone']
+				jobid = instance_ids[instance_id]
+				if 'StateReason' in j:
+					src = j['StateReason']['Code']
+					if src == 'Client.InstanceInitiatedShutdown': pass # job finished, wait for sqs msg
+					elif src in backoff_states: # backoff & retry
+						increase_it_backoff(it, az)
+						set_job_status(jobid, 'FAILED')
+						# TODO: retry job
+					elif src == 'Client.UserInitiatedShutdown': set_job_status(jobid, 'FAILED')
+					else: # ???
+						raise Exception(j)
+
+	def get_job_status(self, jobid):
 		with self.cache.open() as db:
 			r = db.execute('select status from jobs where jobid=?', (self.args.jobid,)).fetchone()
-			if r is None:
-				self.msg('job not found')
-				sys.exit(1)
-			st = r[0]
+			if r is None: return None
+			return r[0]
+
+	def smk_status(self):
+		self.check_sqs_messages()
+		self.check_instance_status()
+
+		st = self.get_job_status(self.args.jobid)
+		if st is None:
+			self.msg('job not found')
+			sys.exit(1)
 
 		if st in HD.job_end_states:
 			print(st.lower())
 		else:
-			print(self.spot_check_status(self.args.jobid))
+			print('running')
 
 	def get_job_info(self, jobpath):
 		job_properties = read_job_properties(jobpath)
