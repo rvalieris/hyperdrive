@@ -88,7 +88,7 @@ class Cache:
 		with self.open() as db:
 			n, = db.execute('select count(*) from sqlite_master where type=? and name=?',('table','jobs')).fetchone()
 			if n>0: return
-			db.execute('create table if not exists jobs (jobid, jobname, status, instance_id, start_time, end_time, PRIMARY KEY(jobid))')
+			db.execute('create table if not exists jobs (jobid, jobname, status, instance_id, orig_jobscript, start_time, end_time, PRIMARY KEY(jobid))')
 			db.execute('create table if not exists spot_prices (it, az, price, backoff, PRIMARY KEY(it,az))')
 			db.execute('create table if not exists instance_types (it, cpus, mem_mb, storage_gb, PRIMARY KEY(it))')
 			db.execute('create table if not exists it_features (it, key, value, PRIMARY KEY(it,key))')
@@ -264,10 +264,11 @@ class HD:
 					(it,az, float(prices[it][az]['price']),0))
 		self.msg('done', head=False)
 
-	def _host_userscript(self, jobid):
+	def host_userscript(self, jobid):
 		host_file = os.path.join(sys.path[0], 'share', 'host.py')
 		if not os.path.exists(host_file):
 			self.msg('cant find host script: {}'.format(host_file))
+			sys.exit(1)
 		script = open(host_file).read()
 		script = script.replace("<JOBID>", jobid)
 		script = script.replace("<SQSURL>", self.conf['jobQueueUrl'])
@@ -299,7 +300,10 @@ class HD:
 			print('status: '+st)
 
 	def print_status(self):
-		# TODO: if status_time > 30s: refresh
+		# only refresh if delta time > 30 seconds
+		self.check_sqs_messages(delta_seconds=30)
+		self.check_instance_status(delta_seconds=30)
+
 		data = []
 		with self.cache.open() as db:
 			data = db.execute('select jobid,jobname,status,start_time,end_time from jobs').fetchall()
@@ -308,8 +312,8 @@ class HD:
 			data.insert(0, data[0].keys()) # header
 			pp_table(data)
 
-	def check_sqs_messages(self):
-		if not self.cache.timed_lock('sqs_status', 7):
+	def check_sqs_messages(self, delta_seconds=7):
+		if not self.cache.timed_lock('sqs_status', delta_seconds):
 			return
 
 		sqs = boto3.client('sqs')
@@ -331,8 +335,8 @@ class HD:
 						now = datetime.datetime.now().replace(microsecond=0)
 						db.execute('update jobs set end_time=? where jobid=?',(now,j['jobid']))
 
-	def check_instance_status(self):
-		if not self.cache.timed_lock('instance_status', 7):
+	def check_instance_status(self, delta_seconds=7):
+		if not self.cache.timed_lock('instance_status', delta_seconds):
 			return
 
 		instance_ids = {}
@@ -365,13 +369,17 @@ class HD:
 				jobid = instance_ids[instance_id]
 				if 'StateReason' in j:
 					src = j['StateReason']['Code']
-					if src == 'Client.InstanceInitiatedShutdown': pass # job finished, wait for sqs msg
+					if src == 'Client.InstanceInitiatedShutdown':
+						pass # job finished, wait for sqs msg
 					elif src in backoff_states: # backoff & retry
 						increase_it_backoff(it, az)
-						set_job_status(jobid, 'FAILED')
-						# TODO: retry job
-					elif src == 'Client.UserInitiatedShutdown': set_job_status(jobid, 'FAILED')
+						with self.cache.open() as db:
+							jobscript, = db.execute('select orig_jobscript from jobs where jobid=?',(jobid,)).fetchone()
+						self.req_instance(jobid, jobscript)
+					elif src == 'Client.UserInitiatedShutdown':
+						set_job_status(jobid, 'FAILED') # terminated by ec2 api
 					else: # ???
+						set_job_status(jobid, 'FAILED')
 						raise Exception(j)
 
 	def get_job_status(self, jobid):
@@ -414,21 +422,20 @@ class HD:
 
 	def submit_job(self):
 		jobid = str(uuid.uuid4())
-		job_info = self.get_job_info(self.args.jobscript)
 		s3 = boto3.client('s3')
 		bucket, pkey = s3_split_path(self.conf['prefix'])
 		s3.upload_file(self.args.jobscript, bucket, os.path.join(pkey,'_jobs',jobid))
-
-		self.req_instance(jobid, job_info)
+		self.req_instance(jobid, self.args.jobscript)
 		print(jobid)
 
-	def req_instance(self, jobid, job_info):
+	def req_instance(self, jobid, jobscript):
 		ec2 = boto3.client('ec2')
+		job_info = self.get_job_info(jobscript)
 		its = self.find_instances_req(job_info)
 		its = self.find_lowest_price(its, job_info['disk_gb'])
 		instance = random.choice(its)
 		sys.stderr.write(str(instance)+'\n')
-		userdata = self._host_userscript(jobid)
+		userdata = self.host_userscript(jobid)
 		tags = [
 			{'Key': 'Name', 'Value': job_info['jobname'] },
 			{'Key': 'HD-JobId', 'Value': jobid },
@@ -467,8 +474,8 @@ class HD:
 
 		now = datetime.datetime.now().replace(microsecond=0)
 		with self.cache.open() as db:
-			db.execute('insert into jobs (jobid,jobname,status,start_time,instance_id) values(?,?,?,?,?)',
-			(jobid, job_info['jobname'], 'RUNNING', now, instance_id))
+			db.execute('insert or replace into jobs (jobid,jobname,status,start_time,instance_id,orig_jobscript) values(?,?,?,?,?,?)',
+			(jobid, job_info['jobname'], 'RUNNING', now, instance_id,jobscript))
 
 	def main(self):
 		if self.args.subcmd == 'snakemake':
