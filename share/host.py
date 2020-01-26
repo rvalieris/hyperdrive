@@ -11,7 +11,6 @@ import time
 import psutil
 import inotify_simple
 import multiprocessing
-from snakemake.utils import read_job_properties
 # always flush to keep the log going
 print = functools.partial(print, flush=True)
 
@@ -23,10 +22,7 @@ jobscript_path = os.path.join(basedir, 'job.sh')
 log_path = '/var/log/cloud-init-output.log'
 aws = os.path.join(conda_bin_path,'aws')
 
-jobid = '<JOBID>'
-prefix = '<PREFIX>'
-sqs_url = '<SQSURL>'
-log_group = '<LOGGROUP>'
+data = json.loads('''<DATA>''')
 
 def get_metadata():
 	r = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document')
@@ -59,12 +55,11 @@ def drop_priv(pwr):
 def log_watcher():
 	inotify = inotify_simple.INotify()
 	cwl = boto3.client('logs', region_name=region)
-	cwl.create_log_stream(logGroupName=log_group, logStreamName=jobid)
-	jp = read_job_properties(jobscript_path)
-	wait_for_files = dict(map(lambda k: (os.path.join(workflow_path,k),1), jp.get('log',[])))
+	cwl.create_log_stream(logGroupName=data['log_group'], logStreamName=data['jobid'])
+	wait_for_files = dict(map(lambda k: (os.path.join(workflow_path,k),1), data['extra_logs']))
 	wait_for_files[log_path] = 1
 	watching = {}
-	kvargs = {'logGroupName':log_group, 'logStreamName':jobid}
+	kvargs = {'logGroupName':data['log_group'], 'logStreamName':data['jobid']}
 	while True:
 		for f in list(wait_for_files.keys()):
 			if os.path.exists(f):
@@ -131,20 +126,17 @@ def gather_metrics(p):
 
 def run():
 	t0 = datetime.datetime.now()
+	# setup logging
+	multiprocessing.Process(target=log_watcher).start()
 	# setup storage
 	setup_storage()
 	# copy jobscript to /root
-	subprocess.run([aws,'s3','cp',os.path.join('s3://',prefix,'_jobs',jobid),jobscript_path])
-	# setup logging
-	multiprocessing.Process(target=log_watcher).start()
-
+	subprocess.run([aws,'s3','cp',os.path.join('s3://',data['prefix'],'_jobs',data['jobid']),jobscript_path])
 	# sync workflow
-	subprocess.run([aws,'s3','sync','--no-progress',os.path.join('s3://',prefix,'_workflow'),workflow_path])
-
+	subprocess.run([aws,'s3','sync','--no-progress',os.path.join('s3://',data['prefix'],'_workflow'),workflow_path])
 	# set permissions on workflow
 	pwr = pwd.getpwnam('ec2-user')
 	subprocess.run(['chown','-R',"{}:{}".format(pwr.pw_uid,pwr.pw_gid),basedir])
-
 	# start job
 	job_env = os.environ.copy()
 	job_env['LC_ALL'] = 'C'
@@ -161,16 +153,16 @@ def run():
 	print('total runtime: {}'.format(datetime.datetime.now()-t0))
 
 	if p.returncode == 0:
-		sqs.send_message(QueueUrl=sqs_url, MessageBody=json.dumps({'jobid':jobid,'status':'SUCCESS'}))
+		sqs.send_message(QueueUrl=data['sqs_url'], MessageBody=json.dumps({'jobid':data['jobid'],'status':'SUCCESS'}))
 	else:
-		sqs.send_message(QueueUrl=sqs_url, MessageBody=json.dumps({'jobid':jobid,'status':'FAILED'}))
+		sqs.send_message(QueueUrl=data['sqs_url'], MessageBody=json.dumps({'jobid':data['jobid'],'status':'FAILED'}))
 
 if __name__ == '__main__':
 	try:
 		run()
 	except Exception as e:
 		print(e)
-		sqs.send_message(QueueUrl=sqs_url, MessageBody=json.dumps({'jobid':jobid,'status':'FAILED'}))
+		sqs.send_message(QueueUrl=data['sqs_url'], MessageBody=json.dumps({'jobid':data['jobid'],'status':'FAILED'}))
 	time.sleep(3) # give some time for the logging to finish
 	subprocess.run(['sudo','poweroff'])
 

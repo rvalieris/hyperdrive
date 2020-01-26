@@ -264,16 +264,19 @@ class HD:
 					(it,az, float(prices[it][az]['price']),0))
 		self.msg('done', head=False)
 
-	def host_userscript(self, jobid):
+	def host_userscript(self, jobid, job_info):
 		host_file = os.path.join(sys.path[0], 'share', 'host.py')
 		if not os.path.exists(host_file):
 			self.msg('cant find host script: {}'.format(host_file))
 			sys.exit(1)
 		script = open(host_file).read()
-		script = script.replace("<JOBID>", jobid)
-		script = script.replace("<SQSURL>", self.conf['jobQueueUrl'])
-		script = script.replace("<PREFIX>", self.conf['prefix'])
-		script = script.replace("<LOGGROUP>", self.conf['logGroupName'])
+		script = script.replace('<DATA>', json.dumps({
+			'jobid':jobid,
+			'sqs_url':self.conf['jobQueueUrl'],
+			'prefix':self.conf['prefix'],
+			'log_group':self.conf['logGroupName'],
+			'extra_logs': job_info['log']
+		}))
 		return script
 
 	def print_log(self):
@@ -417,7 +420,8 @@ class HD:
 			'mem_mb': mem_mb,
 			'disk_gb': disk_gb,
 			'cpus': job_properties.get('threads',1),
-			'resources': job_properties.get('resources',{})
+			'resources': job_properties.get('resources',{}),
+			'log': job_properties.get('log',[])
 		}
 
 	def submit_job(self):
@@ -435,7 +439,7 @@ class HD:
 		its = self.find_lowest_price(its, job_info['disk_gb'])
 		instance = random.choice(its)
 		sys.stderr.write(str(instance)+'\n')
-		userdata = self.host_userscript(jobid)
+		userdata = self.host_userscript(jobid, job_info)
 		tags = [
 			{'Key': 'Name', 'Value': job_info['jobname'] },
 			{'Key': 'HD-JobId', 'Value': jobid },
