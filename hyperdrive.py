@@ -63,7 +63,7 @@ def boto3_all_results(function, key, **kwargs):
 class Cache:
 	def __init__(self, fname):
 		self.db_path = fname
-		self._create_db()
+		self.create_db()
 	def open(self):
 		c = sqlite3.connect(
 			self.db_path,
@@ -84,7 +84,7 @@ class Cache:
 				return True
 			db.execute('END')
 			return False
-	def _create_db(self):
+	def create_db(self):
 		with self.open() as db:
 			n, = db.execute('select count(*) from sqlite_master where type=? and name=?',('table','jobs')).fetchone()
 			if n>0: return
@@ -119,6 +119,7 @@ class HD:
 		p3 = subparser.add_parser('config',help='create or update hyperdrive config')
 		p3.add_argument('--stack-name', required=True)
 		p3.add_argument('--prefix', required=True)
+		p3.add_argument('--ami', required=True)
 		p3.add_argument('--cache', default='hyperdrive.cache')
 		self.args, self.extra_args = self.parser.parse_known_args()
 		self.conf = {}
@@ -141,7 +142,9 @@ class HD:
 			sys.exit(1)
 
 		self.conf['cache'] = self.args.cache
+		self.conf['amiId'] = self.args.ami
 		self.conf['prefix'] = self.args.prefix
+		self.conf['stackName'] = self.args.stack_name
 		r = cf.describe_stacks(StackName=self.args.stack_name)
 		output_keys = ['jobQueueUrl','logGroupName','workerProfileArn','securityGroupId','group']
 		for o in r['Stacks'][0]['Outputs']:
@@ -149,7 +152,6 @@ class HD:
 				self.msg('Stack dont match expected outputs')
 				sys.exit(1)
 			self.conf[o['OutputKey']] = o['OutputValue']
-		self.conf['stackName'] = self.args.stack_name
 		yaml.dump(self.conf, open(self.args.config,'w'))
 
 	def kill_job(self):
@@ -299,8 +301,8 @@ class HD:
 			print(d,'|',l['message'],end='')
 		print('------')
 		with self.cache.open() as db:
-			st, = db.execute('select status from jobs where jobid=?',(self.args.jobid,)).fetchone()
-			print('status: '+st)
+			r = db.execute('select status from jobs where jobid=?',(self.args.jobid,)).fetchone()
+			if r is not None: print('status: '+r[0])
 
 	def print_status(self):
 		# only refresh if delta time > 30 seconds
@@ -375,10 +377,11 @@ class HD:
 					if src == 'Client.InstanceInitiatedShutdown':
 						pass # job finished, wait for sqs msg
 					elif src in backoff_states: # backoff & retry
+						set_job_status(jobid, 'PENDING')
 						increase_it_backoff(it, az)
 						with self.cache.open() as db:
 							jobscript, = db.execute('select orig_jobscript from jobs where jobid=?',(jobid,)).fetchone()
-						self.req_instance(jobid, jobscript)
+						self.req_instance(jobid, jobscript) # retry job
 					elif src == 'Client.UserInitiatedShutdown':
 						set_job_status(jobid, 'FAILED') # terminated by ec2 api
 					else: # ???
