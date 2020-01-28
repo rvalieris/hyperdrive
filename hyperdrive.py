@@ -296,9 +296,12 @@ class HD:
 				sys.exit(1)
 			else:
 				raise e
+		prev_ln = True
 		for l in r['events']:
 			d = datetime.datetime.fromtimestamp(round(l['timestamp']/1000))
-			print(d,'|',l['message'],end='')
+			if prev_ln: print(d,'|',l['message'],end='')
+			else: print(l['message'],end='')
+			prev_ln = l['message'].endswith('\n')
 		print('------')
 		with self.cache.open() as db:
 			r = db.execute('select status from jobs where jobid=?',(self.args.jobid,)).fetchone()
