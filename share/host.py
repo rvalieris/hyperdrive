@@ -106,19 +106,25 @@ def setup_storage():
 # collect peak metrics while 'p' is running
 def gather_metrics(p):
 	m = psutil.virtual_memory()
+	s = sum(psutil.cpu_percent(percpu=True))
 	d = {
 		'tot_mem_mb': m.total/(2**20),
 		'max_mem_mb': (m.total-m.available)/(2**20),
 		'tot_disk_mb': psutil.disk_usage(mountdir).total/(2**20),
 		'max_disk_mb': psutil.disk_usage(mountdir).used/(2**20),
-		'max_cpu_usage': sum(psutil.cpu_percent(percpu=True)),
+		'max_cpu_usage': s,
+		'tot_cpu_usage': 0,
+		'n_samples': 0,
 		'n_cores': psutil.cpu_count()
 	}
 	while True:
+		s = sum(psutil.cpu_percent(percpu=True))
 		m = psutil.virtual_memory()
 		d['max_mem_mb'] = max(d['max_mem_mb'], (m.total-m.available)/(2**20))
 		d['max_disk_mb'] = max(d['max_disk_mb'], psutil.disk_usage(mountdir).used/(2**20))
-		d['max_cpu_usage'] = max(d['max_cpu_usage'], sum(psutil.cpu_percent(percpu=True)))
+		d['max_cpu_usage'] = max(d['max_cpu_usage'], s)
+		d['tot_cpu_usage'] += s
+		d['n_samples'] += 1
 		try:
 			if p.wait(timeout=10) is not None: break
 		except subprocess.TimeoutExpired: pass
@@ -147,9 +153,10 @@ def run():
 	p=subprocess.Popen(['bash',jobscript_path], preexec_fn=functools.partial(drop_priv, pwr), env=job_env, cwd=workflow_path)
 	m = gather_metrics(p)
 	print('--JOB-END--')
-	print('peak memory: {:.1f}MB, {:.1f}GB, {:.1f}%'.format(m['max_mem_mb'],m['max_mem_mb']/1024,100*m['max_mem_mb']/m['tot_mem_mb']))
-	print('peak disk: {:.1f}MB, {:.1f}GB, {:.1f}%'.format(m['max_disk_mb'],m['max_disk_mb']/1024,100*m['max_disk_mb']/m['tot_disk_mb']))
+	print('peak memory: {:.1f}MB, {:.1f}GB, {:.1f}% of {:.1f}GB'.format(m['max_mem_mb'],m['max_mem_mb']/1024,100*m['max_mem_mb']/m['tot_mem_mb'],m['tot_mem_mb']/1024))
+	print('peak disk: {:.1f}MB, {:.1f}GB, {:.1f}% of {:.1f}GB'.format(m['max_disk_mb'],m['max_disk_mb']/1024,100*m['max_disk_mb']/m['tot_disk_mb'],m['tot_disk_mb']/1024))
 	print('peak cpu: {:.1f}% / {} cores'.format(m['max_cpu_usage'],m['n_cores']))
+	print('avg cpu: {:.1f}% / {} cores'.format(m['tot_cpu_usage']/m['n_samples'],m['n_cores']))
 	print('total runtime: {}'.format(datetime.datetime.now()-t0))
 
 	if p.returncode == 0:
