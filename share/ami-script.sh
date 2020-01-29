@@ -10,14 +10,17 @@ source /etc/profile.d/lang.sh
 unshare --user --map-root-user usermod -d /tmp/ec2-user ec2-user
 mv /home/ec2-user /tmp
 
+# remove stuff
+yum -y remove postfix mariadb-libs selinux-policy cronie audit update-motd amazon-linux-extras gdisk libicu man-db less glibc-locale-source glibc-all-langpacks
+
 # install conda
 curl https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o conda.sh
-mkdir /opt/conda
 bash conda.sh -bfp /opt/conda
 rm -f conda.sh
 ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh
 source /etc/profile.d/conda.sh
-conda update --yes --all -c conda-forge -c bioconda
+conda update --all --yes -c conda-forge -c bioconda
+conda clean --all --yes
 conda install --yes -c conda-forge -c bioconda awscli snakemake inotify_simple
 conda clean --all --yes
 
@@ -46,11 +49,12 @@ cd /root
 
 # disable stuff
 systemctl mask serial-getty@ttyS0.service
+systemctl mask systemd-tmpfiles-clean.timer
 systemctl disable getty@tty1
 systemctl disable rsyslog
 
 # dont use PrivateTmp
-sed -i 's/PrivateTmp=yes/PrivateTmp=no/' /etc/systemd/system/multi-user.target.wants/chronyd.service
+sed -i 's/PrivateTmp=yes/PrivateTmp=no/' /usr/lib/systemd/system/chronyd.service
 
 # raid0 params
 echo 'options raid0 default_layout=2' > /etc/modprobe.d/raid0.conf
@@ -64,7 +68,7 @@ sed -i 's/^mount tmp =.*/mount tmp = no/' /usr/local/etc/singularity/singularity
 sed -i 's/^mount hostfs =.*/mount hostfs = yes/' /usr/local/etc/singularity/singularity.conf
 
 # clean up
-yum -y remove gcc git postfix glibc-locale-source mariadb-libs glibc-all-langpacks selinux-policy cronie audit
+yum -y remove gcc git
 yum -y autoremove
 yum clean all
 rm -rf /usr/share/doc

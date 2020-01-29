@@ -47,7 +47,7 @@ Resources:
       VisibilityTimeout: 0
       Tags:
         - 
-          Key: HD-Stack
+          Key: hyperdrive.stack
           Value: !Ref "AWS::StackName"
   WorkerRole:
     Type: 'AWS::IAM::Role'
