@@ -427,7 +427,9 @@ class HD:
 			'disk_gb': disk_gb,
 			'cpus': job_properties.get('threads',1),
 			'resources': job_properties.get('resources',{}),
-			'log': job_properties.get('log',[])
+			'log': job_properties.get('log',[]),
+			'rule': job_properties.get('rule',''),
+			'wildcards': job_properties.get('wildcards',{}),
 		}
 
 	def submit_job(self):
@@ -448,10 +450,13 @@ class HD:
 		userdata = self.host_userscript(jobid, job_info)
 		tags = [
 			{'Key': 'Name', 'Value': job_info['jobname'] },
-			{'Key': 'HD-JobId', 'Value': jobid },
-			{'Key': 'HD-Prefix', 'Value': self.conf['prefix'] },
-			{'Key': 'HD-Stack', 'Value': self.conf['stackName'] }
+			{'Key': 'hyperdrive.prefix', 'Value': self.conf['prefix'] },
+			{'Key': 'hyperdrive.jobid', 'Value': jobid },
+			{'Key': 'hyperdrive.stack', 'Value': self.conf['stackName'] },
+			{'Key': 'hyperdrive.rule', 'Value': job_info['rule'] }
 		]
+		for k in job_info['wildcards'].keys():
+			tags.append({ 'Key': 'hyperdrive.wildcards.'+k, 'Value': job_info['wildcards'][k] })
 		block_devices = []
 		if instance['extra_ebs'] > 0:
 			block_devices.append({
