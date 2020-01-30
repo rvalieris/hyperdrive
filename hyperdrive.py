@@ -11,6 +11,7 @@ import sqlite3
 import uuid
 import subprocess
 import random
+import requests
 import math
 from snakemake.utils import read_job_properties
 import functools
@@ -93,6 +94,7 @@ class Cache:
 			db.execute('create table if not exists instance_types (it, cpus, mem_mb, storage_gb, PRIMARY KEY(it))')
 			db.execute('create table if not exists it_features (it, key, value, PRIMARY KEY(it,key))')
 			db.execute('create table if not exists timed_locks (key, dt, PRIMARY KEY(key))')
+			db.execute('create table if not exists meta (key,value, PRIMARY KEY(key))')
 
 class HD:
 	job_end_states = ['SUCCESS','FAILED']
@@ -129,6 +131,29 @@ class HD:
 		elif self.args.subcmd is not None and self.args.subcmd != 'config':
 			self.msg('run "{} config" first'.format(self.pname))
 			sys.exit(1)
+
+	def get_ebs_gp2_price(self):
+		with self.cache.open() as db:
+			r = db.execute('select value from meta where key=?',('ebs_gp2_price',)).fetchone()
+			if r is not None:
+				return r[0]
+
+		region_name = boto3.client('ec2').meta.region_name
+		url = 'https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/{}/index.json'
+		data = requests.get(url.format(region_name)).json()
+		def gp2(k):
+			if 'attributes' not in data['products'][k]: return False
+			if 'volumeApiName' not in data['products'][k]['attributes']: return False
+			if data['products'][k]['attributes']['volumeApiName'] != 'gp2': return False
+			return True
+
+		pcode = list(filter(gp2, data['products'].keys()))[0]
+		code2 = list(data['terms']['OnDemand'][pcode].keys())[0]
+		code3 = list(data['terms']['OnDemand'][pcode][code2]['priceDimensions'].keys())[0]
+		pricePerUnit = data['terms']['OnDemand'][pcode][code2]['priceDimensions'][code3]['pricePerUnit']['USD']
+		with self.cache.open() as db:
+			db.execute('insert or replace into meta values(?,?)',('ebs_gp2_price',float(pricePerUnit)))
+		return float(pricePerUnit)
 
 	def create_config(self):
 		cf = boto3.client('cloudformation')
@@ -185,7 +210,7 @@ class HD:
 
 	def find_lowest_price(self, instance_list, storage_gb):
 		self.get_spot_prices()
-		ebs_gb_hour = 0.1/(24*30) # TODO
+		ebs_gb_hour = self.get_ebs_gp2_price()/(24*30)
 		ls = []
 		with self.cache.open() as db:
 			for i in instance_list.keys():
