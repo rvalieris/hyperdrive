@@ -531,6 +531,7 @@ class HD:
 				])
 				if p.returncode != 0: sys.exit(p.returncode)
 				self.get_instances_info()
+				self.get_ebs_gp2_price()
 				self.get_spot_prices()
 			os.execvp('snakemake',['snakemake',
 				'--default-remote-provider', 'S3',
