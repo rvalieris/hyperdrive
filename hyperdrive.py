@@ -368,6 +368,10 @@ class HD:
 						now = datetime.datetime.now().replace(microsecond=0)
 						db.execute('update jobs set end_time=? where jobid=?',(now,j['jobid']))
 
+	def increase_it_backoff(self, instance_type, az):
+		with self.cache.open() as db:
+			db.execute('update spot_prices set backoff = backoff + 1 where it=? and az=?',(instance_type,az))
+
 	def check_instance_status(self, delta_seconds=7):
 		if not self.cache.timed_lock('instance_status', delta_seconds):
 			return
@@ -385,9 +389,6 @@ class HD:
 			InstanceIds=list(instance_ids.keys())
 		)
 
-		def increase_it_backoff(instance_type, az):
-			with self.cache.open() as db:
-				db.execute('update spot_prices set backoff = backoff + 1 where it=? and az=?',(instance_type,az))
 		def set_job_status(jobid, status):
 			with self.cache.open() as db:
 				db.execute('update jobs set status = ? where jobid=?',(status,jobid))
@@ -406,7 +407,7 @@ class HD:
 						pass # job finished, wait for sqs msg
 					elif src in backoff_states: # backoff & retry
 						set_job_status(jobid, 'PENDING')
-						increase_it_backoff(it, az)
+						self.increase_it_backoff(it, az)
 						with self.cache.open() as db:
 							jobscript, = db.execute('select orig_jobscript from jobs where jobid=?',(jobid,)).fetchone()
 						self.req_instance(jobid, jobscript) # retry job
@@ -488,26 +489,35 @@ class HD:
 				'DeviceName': '/dev/xvdz',
 				'Ebs': { 'VolumeSize': instance['extra_ebs'], 'VolumeType': 'gp2' }
 			})
-		r = ec2.run_instances(
-			MinCount=1, MaxCount=1,
-			SecurityGroupIds=[self.conf['securityGroupId']],
-			ImageId=self.conf['amiId'],
-			InstanceType=instance['it'],
-			Placement={ 'AvailabilityZone': instance['az'] },
-			UserData=userdata,
-			IamInstanceProfile={ 'Arn': self.conf['workerProfileArn']},
-			BlockDeviceMappings=block_devices,
-			InstanceMarketOptions={
-				'MarketType': 'spot',
-				'SpotOptions': { 'SpotInstanceType': 'one-time' }
-			},
-			TagSpecifications=[
-				{'ResourceType': 'instance', 'Tags': tags},
-				{'ResourceType': 'volume', 'Tags': tags},
-			]
-		)
+		try:
+			r = ec2.run_instances(
+				MinCount=1, MaxCount=1,
+				SecurityGroupIds=[self.conf['securityGroupId']],
+				ImageId=self.conf['amiId'],
+				InstanceType=instance['it'],
+				Placement={ 'AvailabilityZone': instance['az'] },
+				UserData=userdata,
+				IamInstanceProfile={ 'Arn': self.conf['workerProfileArn']},
+				BlockDeviceMappings=block_devices,
+				InstanceMarketOptions={
+					'MarketType': 'spot',
+					'SpotOptions': { 'SpotInstanceType': 'one-time' }
+				},
+				TagSpecifications=[
+					{'ResourceType': 'instance', 'Tags': tags},
+					{'ResourceType': 'volume', 'Tags': tags},
+				]
+			)
+		except botocore.exceptions.ClientError as e:
+			if e.response['Error']['Code'] == 'InsufficientInstanceCapacity':
+				# backoff & try again
+				self.msg('InsufficientInstanceCapacity, backoff & retry')
+				self.increase_it_backoff(instance['it'], instance['az'])
+				self.req_instance(jobid, jobscript) # retry
+				return
+			else:
+				raise e
 		r = r['Instances'][0]
-		#sir_id = r['SpotInstanceRequestId']
 		instance_id = r['InstanceId']
 		if instance_id is None or instance_id == '':
 			raise Exception(r)
