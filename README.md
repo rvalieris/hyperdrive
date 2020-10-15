@@ -14,7 +14,7 @@ run [snakemake](https://snakemake.readthedocs.io/) workflows on AWS.
 
 ## getting started
 
-read the [Guide](guide.md).
+read the [guide](docs/guide.md) and the [q&a](docs/qea.md).
 
 ## disclaimer
 

@@ -109,7 +109,7 @@ the instance only have very basic linux tools.
 into a single output file.
   * use a common `tmp` path for temporary output files to make it easier to delete later
 
-* the prefix can be accessed with `config['DEFAULT_REMOTE_PREFIX']`
+* the prefix can be accessed inside the workflow with `config['DEFAULT_REMOTE_PREFIX']`
   * can be used on the workflow to avoid hardcoding the prefix
 
 
@@ -140,7 +140,20 @@ All instances and volumes used are tagged with the following tags:
 * `hyperdrive.rule`, the snakemake rule that created the job
 * `hyperdrive.wildcards.<x>`, wildcards of the job
 
+## Extra features
+
+Besides threads/mem and disk you can also further narrow instance-types by requesting extra features:
+
+* `resources: avx=N`
+  * `avx=1` for instances with AVX
+  * `avx=2` for instances with AVX2
+  * `avx=3` for instances with AVX512
+
 ## Tips & Gotchas
+
+* aws instance-types sizes follow a power of 2 law, if your job requests 5 threads you will get a 8-core instance, so its better to either use 4 or 8 threads, same idea for memory.
+
+* be careful with short-lived jobs, if you have many short-lived jobs try to run all of them as a single job to minimize the overhead of launching a new ec2 instance.
 
 * aws have quotas/limits on how much of a resource you can use, you might
 need to contact support to increase these limits if you want to run big workflows.
